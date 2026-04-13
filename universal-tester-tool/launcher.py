@@ -27,6 +27,11 @@ _STUBS = [
     "blatann.nrf.nrf_events",
     "blatann.gap",
     "blatann.gap.gap_types",
+    "blatann.gap.advertise_data",
+    "blatann.peer",
+    "blatann.gatt",
+    "blatann.gatt.gattc",
+    "blatann.event_args",
 ]
 
 for s in _STUBS:
@@ -34,13 +39,19 @@ for s in _STUBS:
 
 # Provide the symbols that are actually referenced at import time
 sys.modules["blatann"].BleDevice = type("BleDevice", (), {})
-sys.modules["blatann.gap.gap_types"].ConnectionParameters = type(
-    "ConnectionParameters", (), {}
-)
+sys.modules["blatann.gap.gap_types"].ConnectionParameters = type("ConnectionParameters", (), {})
+sys.modules["blatann.gap.advertise_data"].ScanReport = type("ScanReport", (), {})
+sys.modules["blatann.peer"].Peer = type("Peer", (), {})
+sys.modules["blatann.gatt.gattc"].GattcCharacteristic = type("GattcCharacteristic", (), {})
+sys.modules["blatann.event_args"].NotificationReceivedEventArgs = type("NotificationReceivedEventArgs", (), {})
+sys.modules["blatann.event_args"].ReadCompleteEventArgs = type("ReadCompleteEventArgs", (), {})
 
 # ── now run the real main.py ──────────────────────────────────────────
 # argv is forwarded as-is (launcher.py replaces main.py in the command)
-universal_tester_tool_root = os.environ.get("UNIVERSAL_TESTER_TOOL_ROOT") or os.path.dirname(os.path.abspath(__file__))
+universal_tester_tool_root = os.environ.get("UNIVERSAL_TESTER_TOOL_ROOT") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "third_party", "universal-tester-tool",
+)
 # If UNIVERSAL_TESTER_TOOL_ROOT is relative, resolve it safely.
 if not os.path.isabs(universal_tester_tool_root):
     cwd_resolved = os.path.abspath(universal_tester_tool_root)

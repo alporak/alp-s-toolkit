@@ -26,7 +26,7 @@ if ROOT_DIR not in sys.path:
 from modules.server_singleton import ensure_server_session
 ensure_server_session()
 
-JIRA_DIR = os.path.join(ROOT_DIR, "jira-time-tracker")
+JIRA_DIR = os.path.join(ROOT_DIR, "third_party", "jira-time-tracker")
 JIRA_CFG = os.path.join(JIRA_DIR, "jira_config.json")
 DOMAIN = "teltonika-telematics.atlassian.net"
 PROJECT_KEY = "FMBP"

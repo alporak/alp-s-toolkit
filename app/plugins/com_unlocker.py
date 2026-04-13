@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.plugins.base import ToolkitPlugin
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-HANDLE_TOOL = os.path.join(ROOT, "com-killer", "handle64.exe")
+HANDLE_TOOL = os.path.join(ROOT, "third_party", "com-killer", "handle64.exe")
 
 
 def _is_admin() -> bool:

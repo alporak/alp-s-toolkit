@@ -12,7 +12,7 @@ from contextlib import contextmanager
 import getpass
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EASY_CATCHER_DIR = os.path.join(ROOT_DIR, 'easy-catcher')
+EASY_CATCHER_DIR = os.path.join(ROOT_DIR, 'third_party', 'easy-catcher')
 
 
 @contextmanager

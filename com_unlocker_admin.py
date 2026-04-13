@@ -157,7 +157,7 @@ async function loadStatus() {
     badge.style.color = 'var(--red)';
   }
   if (!s.handle_found) {
-    alerts.innerHTML = '<div class="card card-error"><strong>Missing Tool</strong><p class="text-muted">handle64.exe not found in com-killer/ directory</p></div>';
+    alerts.innerHTML = '<div class="card card-error"><strong>Missing Tool</strong><p class="text-muted">handle64.exe not found in third_party/com-killer/ directory</p></div>';
   }
 }
 

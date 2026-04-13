@@ -45,8 +45,8 @@ _RX_TICKET = _re.compile(r'[A-Z]{2,10}-\d+')  # e.g. FMBP-54666
 def load_toolkit_settings():
     config_path = os.path.join(ROOT_DIR, 'toolkit_settings.json')
     default = {
-        'catcher_path': os.path.join(ROOT_DIR, 'easy-catcher', 'catcher_mod', 'Catcher.exe'),
-        'clg2txt_path': os.path.join(ROOT_DIR, 'easy-catcher', 'catcher_mod', 'Clg2Txt.exe'),
+        'catcher_path': os.path.join(ROOT_DIR, 'third_party', 'easy-catcher', 'catcher_mod', 'Catcher.exe'),
+        'clg2txt_path': os.path.join(ROOT_DIR, 'third_party', 'easy-catcher', 'catcher_mod', 'Clg2Txt.exe'),
         'db_path': '',
         'tickets_folder': '',
         'jira_base_url': DEFAULT_JIRA_BASE,

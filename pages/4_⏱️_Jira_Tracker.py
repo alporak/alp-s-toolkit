@@ -88,7 +88,7 @@ from requests.auth import HTTPBasicAuth
 
 # Resolve paths
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-JIRA_DIR = os.path.join(ROOT_DIR, "jira-time-tracker")
+JIRA_DIR = os.path.join(ROOT_DIR, "third_party", "jira-time-tracker")
 JIRA_APP = os.path.join(JIRA_DIR, "streamlit_app.py")
 JIRA_CONFIG = os.path.join(JIRA_DIR, "jira_config.json")
 JIRA_DOMAIN = "teltonika-telematics.atlassian.net"
