@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import sys
 import time
 import threading
@@ -41,6 +42,64 @@ from server_app.teltonika_server import (
 
 _server: TeltonikaServer | None = None
 _server_lock = threading.Lock()
+TLS_CERT_DIR = os.path.join(ROOT, "output", "tls_certs")
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(path.strip()))
+
+
+def _copy_tls_file(source_path: str, current_path: str, file_stem: str) -> tuple[str, str | None]:
+    """Copy TLS material into toolkit-managed storage and return persisted path."""
+    src = (source_path or "").strip()
+    cur = (current_path or "").strip()
+    if not src:
+        return cur, None
+
+    src_abs = _normalize_path(src)
+    cur_abs = _normalize_path(cur) if cur else ""
+
+    if cur_abs and src_abs == cur_abs:
+        if os.path.isfile(cur_abs):
+            return cur_abs, None
+        return "", f"Stored TLS file not found: {cur_abs}"
+
+    if not os.path.isfile(src_abs):
+        return "", f"TLS file not found: {src_abs}"
+
+    os.makedirs(TLS_CERT_DIR, exist_ok=True)
+    ext = os.path.splitext(src_abs)[1] or ".pem"
+    dest = os.path.join(TLS_CERT_DIR, f"{file_stem}{ext}")
+    try:
+        shutil.copy2(src_abs, dest)
+    except Exception as e:
+        return "", f"Failed to copy TLS file '{src_abs}': {e}"
+    return dest, None
+
+
+def _server_from_cfg(cfg: dict) -> TeltonikaServer:
+    return TeltonikaServer(
+        port=cfg.get("server_port", 8000),
+        protocol=cfg.get("server_protocol", "TCP"),
+        tls_enabled=cfg.get("server_tls_enabled", False),
+        tls_cert_path=cfg.get("server_tls_cert_path", ""),
+        tls_key_path=cfg.get("server_tls_key_path", ""),
+        tls_ca_path=cfg.get("server_tls_ca_path", ""),
+        tls_verify_client=cfg.get("server_tls_verify_client", False),
+    )
+
+
+def _settings_response(cfg: dict) -> dict:
+    return {
+        "port": cfg.get("server_port", 7580),
+        "protocol": cfg.get("server_protocol", "TCP"),
+        "tls_enabled": cfg.get("server_tls_enabled", False),
+        "tls_cert_path": cfg.get("server_tls_cert_path", ""),
+        "tls_key_path": cfg.get("server_tls_key_path", ""),
+        "tls_ca_path": cfg.get("server_tls_ca_path", ""),
+        "tls_verify_client": cfg.get("server_tls_verify_client", False),
+        "avl_ids_path": cfg.get("avl_ids_path", ""),
+    }
 
 
 def _get_server() -> TeltonikaServer:
@@ -48,10 +107,7 @@ def _get_server() -> TeltonikaServer:
     with _server_lock:
         if _server is None:
             cfg = config.load()
-            _server = TeltonikaServer(
-                port=cfg.get("server_port", 8000),
-                protocol=cfg.get("server_protocol", "TCP"),
-            )
+            _server = _server_from_cfg(cfg)
         return _server
 
 
@@ -61,7 +117,10 @@ def _replace_server(port: int, protocol: str) -> TeltonikaServer:
         if _server and _server.running:
             _server.stop()
             time.sleep(0.3)
-        _server = TeltonikaServer(port=port, protocol=protocol)
+        cfg = config.load()
+        cfg["server_port"] = port
+        cfg["server_protocol"] = protocol
+        _server = _server_from_cfg(cfg)
         return _server
 
 
@@ -177,6 +236,11 @@ class IntervalReq(BaseModel):
 class ServerSettings(BaseModel):
     port: Optional[int] = None
     protocol: Optional[str] = None
+    tls_enabled: Optional[bool] = None
+    tls_cert_path: Optional[str] = None
+    tls_key_path: Optional[str] = None
+    tls_ca_path: Optional[str] = None
+    tls_verify_client: Optional[bool] = None
     avl_ids_path: Optional[str] = None
 
 
@@ -211,7 +275,11 @@ class GPSServerPlugin(ToolkitPlugin):
                 print(f"  [gps] AVL IDs file not found: {avl}")
 
         # Auto-start server
-        print(f"  [gps] Starting {cfg.get('server_protocol', 'TCP')} server on port {cfg.get('server_port', 8000)}")
+        tls_mode = "TLS" if cfg.get("server_tls_enabled", False) else "PLAINTEXT"
+        print(
+            f"  [gps] Starting {cfg.get('server_protocol', 'TCP')} ({tls_mode}) "
+            f"server on port {cfg.get('server_port', 8000)}"
+        )
         err = srv.start()
         if err:
             print(f"  [gps] Server start warning: {err}")
@@ -372,24 +440,78 @@ class GPSServerPlugin(ToolkitPlugin):
         @app.get("/api/gps/settings")
         async def gps_settings_get():
             cfg = config.load()
-            return {
-                "port": cfg.get("server_port", 7580),
-                "protocol": cfg.get("server_protocol", "TCP"),
-                "avl_ids_path": cfg.get("avl_ids_path", ""),
-            }
+            return _settings_response(cfg)
 
         @app.put("/api/gps/settings")
         async def gps_settings(req: ServerSettings):
+            current_cfg = config.load()
             updates = {}
             need_restart = False
+
+            protocol = (req.protocol if req.protocol is not None else current_cfg.get("server_protocol", "TCP")).upper()
+            tls_enabled = req.tls_enabled if req.tls_enabled is not None else bool(current_cfg.get("server_tls_enabled", False))
+            tls_verify_client = (
+                req.tls_verify_client
+                if req.tls_verify_client is not None
+                else bool(current_cfg.get("server_tls_verify_client", False))
+            )
+
+            cert_path = current_cfg.get("server_tls_cert_path", "")
+            key_path = current_cfg.get("server_tls_key_path", "")
+            ca_path = current_cfg.get("server_tls_ca_path", "")
+
+            if req.tls_cert_path is not None:
+                cert_path, err = _copy_tls_file(req.tls_cert_path, cert_path, "server_cert")
+                if err:
+                    return {"ok": False, "msg": err}
+                updates["server_tls_cert_path"] = cert_path
+                need_restart = True
+
+            if req.tls_key_path is not None:
+                key_path, err = _copy_tls_file(req.tls_key_path, key_path, "server_key")
+                if err:
+                    return {"ok": False, "msg": err}
+                updates["server_tls_key_path"] = key_path
+                need_restart = True
+
+            if req.tls_ca_path is not None:
+                if req.tls_ca_path.strip():
+                    ca_path, err = _copy_tls_file(req.tls_ca_path, ca_path, "ca_cert")
+                    if err:
+                        return {"ok": False, "msg": err}
+                else:
+                    ca_path = ""
+                updates["server_tls_ca_path"] = ca_path
+                need_restart = True
+
             if req.port is not None:
                 updates["server_port"] = req.port
                 need_restart = True
             if req.protocol is not None:
-                updates["server_protocol"] = req.protocol
+                updates["server_protocol"] = protocol
+                need_restart = True
+            if req.tls_enabled is not None:
+                updates["server_tls_enabled"] = tls_enabled
+                need_restart = True
+            if req.tls_verify_client is not None:
+                updates["server_tls_verify_client"] = tls_verify_client
                 need_restart = True
             if req.avl_ids_path is not None:
                 updates["avl_ids_path"] = req.avl_ids_path
+
+            effective_cert = updates.get("server_tls_cert_path", cert_path)
+            effective_key = updates.get("server_tls_key_path", key_path)
+            effective_ca = updates.get("server_tls_ca_path", ca_path)
+
+            if tls_enabled and protocol != "TCP":
+                return {"ok": False, "msg": "TLS is supported only in TCP mode"}
+            if tls_enabled and not effective_cert:
+                return {"ok": False, "msg": "TLS certificate path is required when TLS is enabled"}
+            if tls_enabled and not effective_key:
+                return {"ok": False, "msg": "TLS private key path is required when TLS is enabled"}
+            if tls_enabled and tls_verify_client and not effective_ca:
+                return {"ok": False, "msg": "CA certificate path is required when client verification is enabled"}
+
             if updates:
                 config.save(updates)
                 print(f"  [gps] Settings saved: {updates}")
@@ -404,8 +526,11 @@ class GPSServerPlugin(ToolkitPlugin):
                 cfg = config.load()
                 srv = _replace_server(cfg["server_port"], cfg["server_protocol"])
                 err = srv.start()
-                return {"ok": err is None, "msg": err or "Settings applied & server restarted"}
-            return {"ok": True, "msg": "Settings saved"}
+                if err:
+                    return {"ok": False, "msg": err, "settings": _settings_response(cfg)}
+                return {"ok": True, "msg": "Settings applied & server restarted", "settings": _settings_response(cfg)}
+            cfg = config.load()
+            return {"ok": True, "msg": "Settings saved", "settings": _settings_response(cfg)}
 
         @app.get("/api/gps/io_names")
         async def gps_io_names():

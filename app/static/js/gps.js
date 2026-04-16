@@ -1102,16 +1102,93 @@ registerPlugin({
           ))
       ));
 
+      form.appendChild(h("div", { className: "form-group" },
+        h("label", { style: "display:flex;align-items:center;gap:8px" },
+          h("input", {
+            id: "gps-tls-enabled",
+            type: "checkbox",
+            checked: !!cfg.tls_enabled,
+          }),
+          "Enable TLS (TCP only)"
+        ),
+        h("small", { className: "text-muted" },
+          "Certificate files are copied to toolkit storage and reused on restart")
+      ));
+
+      form.appendChild(h("div", { className: "form-group" },
+        h("label", null, "TLS Certificate Path (.pem/.crt)"),
+        h("input", {
+          id: "gps-tls-cert", className: "form-control", type: "text",
+          value: cfg.tls_cert_path || "",
+          placeholder: "C:\\path\\to\\server-cert.pem",
+          style: "width:100%"
+        })
+      ));
+
+      form.appendChild(h("div", { className: "form-group" },
+        h("label", null, "TLS Private Key Path (.key/.pem)"),
+        h("input", {
+          id: "gps-tls-key", className: "form-control", type: "text",
+          value: cfg.tls_key_path || "",
+          placeholder: "C:\\path\\to\\server-key.pem",
+          style: "width:100%"
+        })
+      ));
+
+      form.appendChild(h("div", { className: "form-group" },
+        h("label", null, "CA Certificate Path (optional)"),
+        h("input", {
+          id: "gps-tls-ca", className: "form-control", type: "text",
+          value: cfg.tls_ca_path || "",
+          placeholder: "C:\\path\\to\\ca.pem",
+          style: "width:100%"
+        })
+      ));
+
+      form.appendChild(h("div", { className: "form-group" },
+        h("label", { style: "display:flex;align-items:center;gap:8px" },
+          h("input", {
+            id: "gps-tls-verify-client",
+            type: "checkbox",
+            checked: !!cfg.tls_verify_client,
+          }),
+          "Require client certificate (mTLS)"
+        )
+      ));
+
       form.appendChild(h("button", {
         className: "btn btn-primary", style: "margin-top:8px",
         onclick: async () => {
           try {
             const port = Number($("#gps-port").value);
             const protocol = $("#gps-proto").value;
+            const tls_enabled = !!$("#gps-tls-enabled")?.checked;
+            const tls_cert_path = $("#gps-tls-cert")?.value?.trim() || "";
+            const tls_key_path = $("#gps-tls-key")?.value?.trim() || "";
+            const tls_ca_path = $("#gps-tls-ca")?.value?.trim() || "";
+            const tls_verify_client = !!$("#gps-tls-verify-client")?.checked;
             if (!port || port < 1 || port > 65535) {
               toast("Invalid port number (1-65535)", "error"); return;
             }
-            const payload = { port, protocol };
+            if (tls_enabled && protocol !== "TCP") {
+              toast("TLS is supported only with TCP protocol", "error"); return;
+            }
+            if (tls_enabled && (!tls_cert_path || !tls_key_path)) {
+              toast("TLS certificate and key paths are required when TLS is enabled", "error"); return;
+            }
+            if (tls_enabled && tls_verify_client && !tls_ca_path) {
+              toast("CA certificate path is required when client verification is enabled", "error"); return;
+            }
+
+            const payload = {
+              port,
+              protocol,
+              tls_enabled,
+              tls_cert_path,
+              tls_key_path,
+              tls_ca_path,
+              tls_verify_client,
+            };
             console.log("[GPS] Saving settings:", payload);
             const res = await api("/api/gps/settings", {
               method: "PUT",
@@ -1120,6 +1197,11 @@ registerPlugin({
             });
             toast(res.ok ? (res.msg || "Settings saved") : ("Error: " + (res.msg || "Unknown")),
                   res.ok ? "success" : "error");
+            if (res.settings) {
+              if ($("#gps-tls-cert")) $("#gps-tls-cert").value = res.settings.tls_cert_path || "";
+              if ($("#gps-tls-key")) $("#gps-tls-key").value = res.settings.tls_key_path || "";
+              if ($("#gps-tls-ca")) $("#gps-tls-ca").value = res.settings.tls_ca_path || "";
+            }
             this._loadStatus();
           } catch (e) { toast("Save failed: " + e.message, "error"); }
         }

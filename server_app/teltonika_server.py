@@ -12,6 +12,7 @@ import datetime
 import select
 import json
 import os
+import ssl
 from collections import defaultdict
 
 
@@ -631,9 +632,20 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 class TeltonikaServer:
     """Teltonika GPS Server – TCP **or** UDP on a single port."""
 
-    def __init__(self, port: int = 8000, protocol: str = 'TCP'):
+    def __init__(self, port: int = 8000, protocol: str = 'TCP',
+                 tls_enabled: bool = False,
+                 tls_cert_path: str = '',
+                 tls_key_path: str = '',
+                 tls_ca_path: str = '',
+                 tls_verify_client: bool = False):
         self.port = port
         self.protocol_mode = protocol.upper()
+        self.tls_enabled = bool(tls_enabled)
+        self.tls_cert_path = tls_cert_path or ''
+        self.tls_key_path = tls_key_path or ''
+        self.tls_ca_path = tls_ca_path or ''
+        self.tls_verify_client = bool(tls_verify_client)
+        self._ssl_context: ssl.SSLContext | None = None
         self.running = False
 
         # TCP
@@ -765,6 +777,16 @@ class TeltonikaServer:
         """Start the server.  Returns error string or None on success."""
         if self.running:
             return None
+
+        if self.tls_enabled and self.protocol_mode != 'TCP':
+            return "TLS is supported only in TCP mode"
+
+        if self.protocol_mode == 'TCP':
+            err = self._prepare_tls_context()
+            if err:
+                self.log(f"Cannot start TLS server: {err}", "ERROR")
+                return err
+
         # Pre-flight port check
         err = self.check_port(self.port, self.protocol_mode)
         if err:
@@ -788,6 +810,44 @@ class TeltonikaServer:
         threading.Thread(target=self._saver_loop, daemon=True).start()
         self.log(f"Server started – {self.protocol_mode} on port {self.port}", "START")
         return None
+
+    def _prepare_tls_context(self) -> str | None:
+        """Create TLS context for TCP mode when enabled."""
+        self._ssl_context = None
+        if not self.tls_enabled:
+            return None
+
+        cert_path = self.tls_cert_path.strip()
+        key_path = self.tls_key_path.strip()
+        ca_path = self.tls_ca_path.strip()
+
+        if not cert_path:
+            return "TLS certificate path is required"
+        if not key_path:
+            return "TLS private key path is required"
+        if not os.path.isfile(cert_path):
+            return f"TLS certificate file not found: {cert_path}"
+        if not os.path.isfile(key_path):
+            return f"TLS private key file not found: {key_path}"
+        if ca_path and not os.path.isfile(ca_path):
+            return f"TLS CA file not found: {ca_path}"
+
+        try:
+            ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
+            if ca_path:
+                ctx.load_verify_locations(cafile=ca_path)
+            ctx.check_hostname = False
+            if self.tls_verify_client:
+                ctx.verify_mode = ssl.CERT_REQUIRED
+            else:
+                ctx.verify_mode = ssl.CERT_NONE
+            self._ssl_context = ctx
+            mode = "mTLS" if self.tls_verify_client else "TLS"
+            self.log(f"{mode} enabled (cert={cert_path})", "INFO")
+            return None
+        except Exception as e:
+            return f"TLS context error: {e}"
 
     def kill_zombie(self, port: int, protocol: str) -> bool:
         """Send a magic kill packet to localhost:port to terminate old instance."""
@@ -830,7 +890,10 @@ class TeltonikaServer:
             self.tcp_socket.bind(('0.0.0.0', self.port))
             self.tcp_socket.listen(10)
             self.tcp_socket.setblocking(False)
-            self.log(f"TCP listening on :{self.port}", "START")
+            if self.tls_enabled:
+                self.log(f"TCP TLS listening on :{self.port}", "START")
+            else:
+                self.log(f"TCP listening on :{self.port}", "START")
 
             while self.running:
                 try:
@@ -841,11 +904,33 @@ class TeltonikaServer:
                         if s is self.tcp_socket:
                             try:
                                 client, addr = self.tcp_socket.accept()
+                                if self.tls_enabled:
+                                    if self._ssl_context is None:
+                                        client.close()
+                                        continue
+                                    try:
+                                        client.settimeout(5.0)
+                                        client = self._ssl_context.wrap_socket(client, server_side=True)
+                                    except ssl.SSLError as e:
+                                        self.log(f"TLS handshake failed from {addr[0]}:{addr[1]}: {e}", "WARN")
+                                        try:
+                                            client.close()
+                                        except Exception:
+                                            pass
+                                        continue
+                                    finally:
+                                        try:
+                                            client.settimeout(None)
+                                        except Exception:
+                                            pass
                                 client.setblocking(False)
                                 with self.lock:
                                     self.tcp_clients[client] = addr
                                     self.tcp_buffers[client] = b''
-                                self.log(f"TCP connect {addr[0]}:{addr[1]}", "CONN")
+                                if self.tls_enabled:
+                                    self.log(f"TCP TLS connect {addr[0]}:{addr[1]}", "CONN")
+                                else:
+                                    self.log(f"TCP connect {addr[0]}:{addr[1]}", "CONN")
                             except:
                                 pass
                         else:
@@ -858,6 +943,10 @@ class TeltonikaServer:
                                     self._process_tcp_buffer(s)
                                 else:
                                     self._close_tcp(s)
+                            except ssl.SSLWantReadError:
+                                continue
+                            except ssl.SSLWantWriteError:
+                                continue
                             except ConnectionResetError:
                                 self._close_tcp(s)
                             except Exception as e:
