@@ -1,10 +1,9 @@
 __pycache__/
 modules/__pycache__/
 Log*
-*config*
 toolkit_settings.json
 output/*
 .vscode/*
 universal-tester-tool/generated/*
 universal-tester-tool/test_cases/*
-
+.project_dumper_config.json
