@@ -5,7 +5,7 @@
 [submodule "easy-catcher"]
 	path = third_party/easy-catcher
 	url = https://gps-gitlab.teltonika.lt/fleet/tools/easy-catcher.git
-	branch = master
+	branch = expfw/alp-toolkit-branch
 [submodule "third_party/universal-tester-tool"]
 	path = third_party/universal-tester-tool
 	url = https://gps-gitlab.teltonika.lt/fleet/tools/universal-bts-tester.git
