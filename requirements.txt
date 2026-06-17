@@ -13,6 +13,7 @@ openpyxl
 
 # ── Networking & utilities ──────────────────────
 requests
+httpx
 jira
 pyyaml
 psutil
