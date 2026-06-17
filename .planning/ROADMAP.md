@@ -25,23 +25,21 @@ Plans:
 ---
 
 ## Phase 2: Frontend Dashboard
-**Goal**: Chart UI showing bug return rate over time.
+**Goal**: Working frontend dashboard showing bug return rate over time via server-side Plotly chart in iframe, with sync button and status display.
 
-**Tasks**:
-1. Create `app/static/js/competence.js`:
-   - Register route handler in core SPA router
-   - Fetch stats from `/api/competence/stats`
-   - Render chart using Plotly (already available in project)
-   - "Sync Now" button calling `POST /api/competence/sync`
-   - Show last sync time from `/api/competence/sync/status`
-2. Import `competence.js` in `app/static/js/app.js`
-3. Add page template section to `app/static/index.html`
+**Requirements**: [FR5]
+
+**Plans**: 1 plan (5 waves)
+
+Plans:
+- [ ] PLAN.md — Chart endpoint + icon → plugin JS skeleton → chart iframe → sync/status → app.js wiring (5 waves)
 
 **Exit criteria**:
-- Dashboard visible in sidebar at correct position
-- Chart renders with period labels on x-axis, return rate on y-axis
-- Sync button triggers sync and shows status
-- Responsive layout matching existing plugin pages
+- Dashboard visible in sidebar at position matching order=45
+- Chart renders with period labels on x-axis, return rate on y-axis (Plotly HTML via iframe srcdoc)
+- Sync button triggers background sync and shows feedback (spinner, disabled state)
+- Status display shows last sync time
+- Layout matches existing plugin design conventions
 
 ---
 
