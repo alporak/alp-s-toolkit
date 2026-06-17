@@ -1,58 +1,71 @@
-# Roadmap — Competence & Performance Plugin
+# Roadmap — Performance Analytics v2
 
 ## Overview
-Two-phase delivery: backend plugin (Phase 1) then frontend UI (Phase 2).
+M2 expands the Competence & Performance Plugin into a power-user analytics dashboard. Two phases: backend data model + API enhancements (Phase 3), then frontend power-dashboard (Phase 4).
 
 ---
 
-## Phase 1: Backend Plugin — Competence Engine
-**Goal**: Working `competence.py` plugin with SQLite cache, Jira sync, and stats API.
+## Phase 1: Backend Plugin (COMPLETE)
+SQLite cache, Jira sync, state machine, stats/sync/status/chart API.
 
-**Requirements**: [FR1, FR2, FR3, FR4, FR5, FR6, NFR1, NFR2, NFR3, NFR4, NFR5]
-
-**Plans**: 1 plan (8 waves)
-
-Plans:
-- [ ] 01-01-PLAN.md — Full plugin: skeleton → SQLite → auth → state machine → sync → stats → endpoints → verification (8 waves)
-
-**Exit criteria**:
-- Plugin auto-discovered and listed in `GET /api/plugins`
-- All three endpoints respond correctly
-- Sync populates SQLite with transitions
-- Stats endpoint returns correctly grouped 2Q periods
-- Plugin works without crashing when Jira config is unset
+## Phase 2: Frontend Dashboard (COMPLETE)
+SPA plugin with bar chart, sync button, status display.
 
 ---
 
-## Phase 2: Frontend Dashboard
-**Goal**: Working frontend dashboard showing bug return rate over time via server-side Plotly chart in iframe, with sync button and status display.
+## Phase 3: Backend Enhancements — Extended Data Model & APIs
+**Goal**: Capture per-transition attribution (who returned, statuses involved), add ticket metadata, expose richer API endpoints.
 
-**Requirements**: [FR5]
+**Files**: `app/plugins/competence.py`
 
-**Plans**: 1 plan (5 waves)
+**Plans:** 1 plan (9 task waves)
 
 Plans:
-- [ ] PLAN.md — Chart endpoint + icon → plugin JS skeleton → chart iframe → sync/status → app.js wiring (5 waves)
+- [ ] `phase-3/PLAN.md` — Full rewrite: extended schema, enhanced parser, ticket metadata sync, 4 new API endpoints + 4 M1 endpoints preserved
 
 **Exit criteria**:
-- Dashboard visible in sidebar at position matching order=45
-- Chart renders with period labels on x-axis, return rate on y-axis (Plotly HTML via iframe srcdoc)
-- Sync button triggers background sync and shows feedback (spinner, disabled state)
-- Status display shows last sync time
-- Layout matches existing plugin design conventions
+- Schema migration runs on startup without data loss
+- Tickets endpoint returns correct per-ticket stats with attribution
+- Ticket detail shows full transition timeline with authors and statuses
+- Volume chart renders attempts + returns per period
+- Summary endpoint returns correct aggregates
+- Existing M1 endpoints unchanged
+
+---
+
+## Phase 4: Frontend Power-Dashboard
+**Goal**: Tabbed power-user dashboard with overview cards, per-ticket table with expandable detail, multi-chart views.
+
+**Files**: `app/static/js/competence.js`, `app/static/js/core.js` (if new icons needed)
+
+**Tasks**:
+1. Replace flat layout with tabbed layout (`createTabs()`: Overview / Per Ticket / Charts)
+2. Overview tab: 4 summary cards (from `/summary`) + return rate chart + volume chart
+3. Per-Ticket tab: sortable table (from `/tickets`), click row → expand transition timeline panel
+4. Charts tab: full-width rate + volume charts with period context
+5. Sync button triggers full refresh of all tabs after completion
+6. Integration test: all tabs render, data flows end-to-end
+
+**Exit criteria**:
+- All three tabs render correctly
+- Summary cards show live data from API
+- Per-ticket table sortable, expandable with timeline
+- Charts tab shows multi-metric views
+- Sync updates all tabs automatically
+- Zero console errors
 
 ---
 
 ## Phase Dependency Graph
 ```
-Phase 1 (Backend) ──► Phase 2 (Frontend)
+Phase 3 (Backend Extensions) ──► Phase 4 (Frontend Power-Dashboard)
 ```
-Phase 2 depends on Phase 1 API being functional.
+Phase 4 depends on Phase 3's new API endpoints.
 
 ---
 
 ## Timeline Estimate
 | Phase | Estimate |
 |-------|----------|
-| Phase 1 | 1 session |
-| Phase 2 | 1 session |
+| Phase 3 | 1 session |
+| Phase 4 | 1 session |
