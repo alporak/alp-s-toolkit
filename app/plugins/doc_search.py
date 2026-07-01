@@ -15,17 +15,20 @@ Exports:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
 import sqlite3
 import subprocess
 import threading
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 
 from app import config
 from app.plugins.base import ToolkitPlugin
+from app.plugins.doc_extraction import compute_sha256, extract_text
 
 logger = logging.getLogger("doc_search")
 
@@ -170,14 +173,256 @@ def _db_get_state(key: str):
 _sync_lock = asyncio.Lock()
 
 
+# ═══════════════════════════════════════════════════════════
+#  Sync pipeline — hash comparison, upsert, cleanup, orchestration
+# ═══════════════════════════════════════════════════════════
+
+def _should_reindex(conn: sqlite3.Connection, repo: str, rel_path: str, sha256: str) -> bool:
+    """Check whether a file needs re-extraction based on stored hash.
+
+    Returns ``True`` if no matching row exists or the stored ``sha256``
+    differs from *sha256*.  Returns ``False`` when hashes match.
+    """
+    row = conn.execute(
+        "SELECT sha256 FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+        (repo, rel_path),
+    ).fetchone()
+    if row is None:
+        return True
+    return row["sha256"] != sha256
+
+
+def _upsert_document(conn: sqlite3.Connection, repo: str, rel_path: str, result: dict) -> int:
+    """Insert or update a document in doc_metadata and rebuild its FTS5 entry.
+
+    Uses content-less FTS5 pattern: DELETE old inverted entry, INSERT new one.
+    The *result* dict is the output of :func:`extract_text` with keys
+    ``text``, ``encoding``, ``needs_ocr``, ``sha256``, ``error``.
+
+    Returns the ``rowid`` of the inserted/updated row.
+    """
+    text = result.get("text", "") or ""
+    sha = result.get("sha256", "") or ""
+    encoding = result.get("encoding", "utf_8") or "utf_8"
+    needs_ocr = 1 if result.get("needs_ocr") else 0
+
+    conn.execute(
+        """INSERT INTO doc_metadata (repo, relative_path, full_text, sha256,
+           encoding, needs_ocr, last_extracted)
+           VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(repo, relative_path) DO UPDATE SET
+             full_text=excluded.full_text,
+             sha256=excluded.sha256,
+             encoding=excluded.encoding,
+             needs_ocr=excluded.needs_ocr,
+             last_extracted=excluded.last_extracted""",
+        (repo, rel_path, text, sha, encoding, needs_ocr),
+    )
+
+    # Retrieve the rowid for the (repo, relative_path) pair
+    fetched = conn.execute(
+        "SELECT id FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+        (repo, rel_path),
+    ).fetchone()
+    if fetched is None:
+        raise RuntimeError(f"Failed to retrieve rowid after upsert for {repo}/{rel_path}")
+    rowid = fetched["id"]
+
+    # Content-less FTS5 update: delete old entry, insert new
+    conn.execute("DELETE FROM doc_search_fts WHERE rowid = ?", (rowid,))
+    conn.execute(
+        "INSERT INTO doc_search_fts(rowid, full_text) VALUES (?, ?)",
+        (rowid, text),
+    )
+
+    return rowid
+
+
+def _clean_deleted(conn: sqlite3.Connection, repo: str, existing_paths: set[str]) -> int:
+    """Remove rows from doc_metadata for files no longer on disk.
+
+    Content-less FTS5 virtual table auto-removes linked rows when the
+    content table row is deleted (via ``content_rowid``).
+
+    Returns the number of deleted rows.
+    """
+    # Collect all relative_path values for the repo
+    all_rows = conn.execute(
+        "SELECT id, relative_path FROM doc_metadata WHERE repo = ?",
+        (repo,),
+    ).fetchall()
+
+    to_delete: list[int] = []
+    for row in all_rows:
+        if row["relative_path"] not in existing_paths:
+            to_delete.append(row["id"])
+
+    if not to_delete:
+        return 0
+
+    # Delete from doc_metadata; FTS5 content-less auto-removes linked rows
+    placeholders = ",".join("?" for _ in to_delete)
+    conn.execute(
+        f"DELETE FROM doc_metadata WHERE id IN ({placeholders})",
+        to_delete,
+    )
+
+    deleted = len(to_delete)
+    logger.info("Cleaned %d deleted files from repo '%s'", deleted, repo)
+    return deleted
+
+
+async def _sync_repo(repo_name: str, repo_path: str) -> dict:
+    """Core per-repo sync coroutine.
+
+    1. ``os.walk(repo_path)`` collecting all file paths (skips ``.git``).
+    2. Compute SHA-256 hash for each file.
+    3. ``_should_reindex`` check → collect files needing change.
+    4. ``ThreadPoolExecutor(max_workers=4)`` parallel extraction via
+       ``asyncio.to_thread()``.
+    5. ``_upsert_document`` for each extraction result.
+    6. ``_clean_deleted`` to remove stale entries.
+
+    Returns a summary dict:
+        ``{repo, pulled, total, changed, deleted, errors}``
+
+    All blocking work (DB, file I/O) runs inside ``asyncio.to_thread()``.
+    """
+    errors: list[str] = []
+
+    def _walk_and_filter() -> tuple[list[tuple[str, str, str]], list[str], list[str]]:
+        """Blocking: walk disk, compute hashes, determine what needs change."""
+        needs_change: list[tuple[str, str, str]] = []  # (rel_path, full_path, sha256)
+        all_rel_paths: list[str] = []
+        errors_inner: list[str] = []
+
+        conn = _get_db()
+        try:
+            for root, dirs, files in os.walk(repo_path):
+                # Skip .git directory
+                if ".git" in dirs:
+                    dirs.remove(".git")
+
+                for fname in files:
+                    full_path = os.path.join(root, fname)
+                    try:
+                        rel_path = os.path.relpath(full_path, repo_path).replace("\\", "/")
+                    except ValueError:
+                        errors_inner.append(f"path resolution failed: {full_path}")
+                        continue
+
+                    all_rel_paths.append(rel_path)
+
+                    sha = compute_sha256(full_path)
+                    if not sha:
+                        errors_inner.append(f"SHA-256 failed: {rel_path}")
+                        continue
+
+                    with _db_lock:
+                        if _should_reindex(conn, repo_name, rel_path, sha):
+                            needs_change.append((rel_path, full_path, sha))
+        finally:
+            conn.close()
+
+        return needs_change, all_rel_paths, errors_inner
+
+    # 1. Walk + hash (blocking)
+    needs_change, all_rel_paths, walk_errors = await asyncio.to_thread(_walk_and_filter)
+    errors.extend(walk_errors)
+
+    total_files = len(all_rel_paths)
+    changed_count = 0
+
+    # 2. Parallel extraction for changed files
+    if needs_change:
+        logger.info(
+            "Repo '%s': %d/%d files need extraction", repo_name, len(needs_change), total_files
+        )
+
+        def _extract_one(full_path: str) -> dict:
+            """Single-file extraction (no-op if extract_text raises — it never does)."""
+            return extract_text(full_path)
+
+        def _upsert_batch(rel_path: str, extr_result: dict) -> None:
+            """Blocking: upsert a single document into the DB."""
+            with _db_lock:
+                conn = _get_db()
+                try:
+                    _upsert_document(conn, repo_name, rel_path, extr_result)
+                    conn.commit()
+                finally:
+                    conn.close()
+
+        # Run extractions in thread pool (max_workers=4)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            # Submit all extraction tasks
+            futures = {
+                pool.submit(_extract_one, full_path): (rel_path, full_path)
+                for rel_path, full_path, _sha in needs_change
+            }
+
+            done_total = 0
+            for future in concurrent.futures.as_completed(futures):
+                rel_path, full_path = futures[future]
+                try:
+                    extr_result = await asyncio.to_thread(future.result)
+                    err = extr_result.get("error")
+                    if err:
+                        errors.append(f"{rel_path}: {err}")
+                    else:
+                        # Upsert into DB (blocking — run in thread)
+                        await asyncio.to_thread(_upsert_batch, rel_path, extr_result)
+                        changed_count += 1
+                except Exception as exc:
+                    errors.append(f"{rel_path}: extraction crashed: {exc}")
+                    logger.warning("Extraction failed for %s: %s", full_path, exc)
+
+                done_total += 1
+                # Update progress in sync_state periodically
+                if done_total % 5 == 0 or done_total == len(needs_change):
+                    _db_upsert_state("sync_progress", {
+                        "phase": "indexing",
+                        "repo": repo_name,
+                        "done": done_total,
+                        "total": len(needs_change),
+                    })
+
+    # 3. Cleanup deleted files
+    def _do_cleanup() -> int:
+        with _db_lock:
+            conn = _get_db()
+            try:
+                existing_set = set(all_rel_paths)
+                deleted = _clean_deleted(conn, repo_name, existing_set)
+                conn.commit()
+                return deleted
+            finally:
+                conn.close()
+
+    deleted_count = await asyncio.to_thread(_do_cleanup)
+
+    logger.info(
+        "Repo '%s' sync complete: %d total, %d changed, %d deleted, %d errors",
+        repo_name, total_files, changed_count, deleted_count, len(errors),
+    )
+
+    return {
+        "repo": repo_name,
+        "pulled": True,
+        "total": total_files,
+        "changed": changed_count,
+        "deleted": deleted_count,
+        "errors": errors,
+    }
+
+
 async def _sync_job() -> None:
-    """Top-level sync orchestrator (async coroutine).
+    """Top-level sync orchestrator.
+
+    Pipeline per repo: git pull → walk → hash → extract → upsert → cleanup.
 
     Guarded by :data:`_sync_lock` — only one sync may run at a time.
     When the lock is already held, the call is silently skipped with a warning.
-
-    This function is extended in Task 2 with the full pipeline
-    (pull → walk → hash → extract → upsert → cleanup).
     """
     if _sync_lock.locked():
         logger.warning("Sync already in progress; skipping duplicate trigger")
@@ -192,8 +437,40 @@ async def _sync_job() -> None:
 
             _db_upsert_state("sync_progress", {"phase": "starting"})
             logger.info("Sync job started — %d repo(s) configured", len(repos))
+
+            for repo in repos:
+                name = repo["name"]
+                path = repo["path"]
+
+                # Phase: pulling
+                _db_upsert_state("sync_progress", {"phase": "pulling", "repo": name})
+                pull_result = await _git_pull(path)
+                logger.info(
+                    "git pull %s: ok=%s (%s)",
+                    name, pull_result["ok"], pull_result["stdout"].strip() or "no output",
+                )
+                # Continue even on pull failure — files may still be on disk
+
+                # Phase: indexing
+                _db_upsert_state("sync_progress", {"phase": "indexing", "repo": name, "done": 0, "total": 0})
+                sync_result = await _sync_repo(name, path)
+                logger.info(
+                    "sync %s: total=%d changed=%d deleted=%d errors=%d",
+                    name,
+                    sync_result["total"],
+                    sync_result["changed"],
+                    sync_result["deleted"],
+                    len(sync_result.get("errors", [])),
+                )
+
+            # Mark complete
+            _db_upsert_state("sync_progress", {"phase": "complete"})
+            _db_upsert_state("last_sync", datetime.now(timezone.utc).isoformat())
+            logger.info("Sync job complete")
+
         except Exception as exc:
             logger.error("Sync job failed: %s", exc)
+            _db_upsert_state("sync_progress", {"phase": "error", "error": str(exc)})
         finally:
             # Lock released by 'async with' exiting
             pass
@@ -271,8 +548,6 @@ class DocSearchPlugin(ToolkitPlugin):
 
                         CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
                             full_text,
-                            content='doc_metadata',
-                            content_rowid='id',
                             tokenize='unicode61'
                         );
 
