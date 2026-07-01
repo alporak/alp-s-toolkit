@@ -81,6 +81,7 @@ registerPlugin({
     this._syncStatus = null;
     this._repoScope = null;
     this._filterRow = null;
+    this._settingsBtn = null;
   },
 
   // ═══════════════════════════════════════════════════════
@@ -116,6 +117,16 @@ registerPlugin({
     }, "Sync Now");
     this._syncBtn = syncBtn;
 
+    const settingsBtn = h("button", {
+      className: "btn btn-secondary",
+      id: "doc-settings-btn",
+      title: "Configure repos",
+      style: { fontSize: "16px", padding: "6px 10px" },
+      onclick: () => self._toggleSettings(),
+    });
+    settingsBtn.textContent = "\u2699"; // ⚙
+    this._settingsBtn = settingsBtn;
+
     const syncStatus = h("span", {
       id: "doc-sync-status",
       className: "text-muted",
@@ -124,8 +135,16 @@ registerPlugin({
 
     header.appendChild(searchInput);
     header.appendChild(syncBtn);
+    header.appendChild(settingsBtn);
     header.appendChild(syncStatus);
     c.appendChild(header);
+
+    // ── Settings panel (hidden by default) ────────────────
+    const settingsPanel = h("div", {
+      id: "doc-settings-panel",
+      style: { display: "none", padding: "16px", border: "1px solid var(--border)", borderRadius: "8px", marginBottom: "16px", background: "var(--bg-secondary)" },
+    });
+    c.appendChild(settingsPanel);
 
     // ── Repo scope indicator ──────────────────────────────
     const repoScope = h("div", {
@@ -759,7 +778,15 @@ registerPlugin({
       el.innerHTML = "";
 
       if (!repos || !repos.length) {
-        el.textContent = "0 repos configured \u2014 add repos in settings";
+        el.innerHTML = "";
+        const self = this;
+        el.appendChild(document.createTextNode("0 repos configured \u2014 "));
+        const btn = h("button", {
+          className: "btn btn-primary btn-sm",
+          style: { fontSize: "11px", padding: "2px 10px", marginLeft: "6px", cursor: "pointer" },
+          onclick: () => self._toggleSettings(),
+        }, "\u2699 Configure");
+        el.appendChild(btn);
         return;
       }
 
@@ -822,5 +849,182 @@ registerPlugin({
       this._resultsContainer.innerHTML = "";
     }
     this._closePreview();
+  },
+
+  // ═══════════════════════════════════════════════════════
+  //  Settings panel — repo configuration
+  // ═══════════════════════════════════════════════════════
+
+  _toggleSettings() {
+    const panel = document.getElementById("doc-settings-panel");
+    const results = this._resultsContainer;
+    const gear = document.getElementById("doc-settings-btn");
+    if (!panel || !results) return;
+
+    const open = panel.style.display !== "none";
+    if (open) {
+      panel.style.display = "none";
+      results.style.display = "";
+      if (gear) gear.textContent = "\u2699"; // ⚙
+      return;
+    }
+    panel.style.display = "block";
+    results.style.display = "none";
+    if (gear) gear.textContent = "\u2715"; // ✕
+    this._renderSettingsPanel();
+  },
+
+  async _renderSettingsPanel() {
+    const panel = document.getElementById("doc-settings-panel");
+    if (!panel) return;
+    panel.innerHTML = "";
+
+    // Load current settings
+    let repos = [];
+    try {
+      const settings = await api("/api/settings");
+      repos = settings.doc_repos || [];
+    } catch (e) {
+      panel.textContent = "Failed to load settings";
+      return;
+    }
+
+    const self = this;
+
+    const title = h("h3", { style: { marginBottom: "12px" } }, "Repository Configuration");
+    panel.appendChild(title);
+
+    // Existing repos list
+    if (!repos.length) {
+      panel.appendChild(h("p", { className: "text-muted", style: { marginBottom: "16px" } }, "No repos configured yet. Add at least one to enable search."));
+    } else {
+      const list = h("div", { style: { marginBottom: "16px" } });
+      for (let i = 0; i < repos.length; i++) {
+        const r = repos[i];
+        const color = REPO_COLORS[r.name] || REPO_COLOR_FALLBACK;
+        const row = h("div", {
+          style: {
+            display: "flex", alignItems: "center", gap: "8px",
+            padding: "8px", border: "1px solid var(--border)", borderRadius: "6px",
+            marginBottom: "6px",
+          },
+        });
+        const badge = h("span", {
+          style: { background: color, color: "#fff", padding: "2px 8px", borderRadius: "8px", fontSize: "12px", fontWeight: "600" },
+        });
+        badge.textContent = r.name;
+        row.appendChild(badge);
+
+        const pathSpan = h("span", {
+          style: { flex: "1", fontSize: "12px", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+        });
+        pathSpan.textContent = r.path || "";
+        row.appendChild(pathSpan);
+
+        const delBtn = h("button", {
+          className: "btn btn-danger btn-sm",
+          style: { fontSize: "11px", padding: "2px 8px" },
+          onclick: (function (idx) { return function () { self._removeRepo(idx); }; })(i),
+        }, "Remove");
+        row.appendChild(delBtn);
+
+        list.appendChild(row);
+      }
+      panel.appendChild(list);
+    }
+
+    // Add repo form
+    const formTitle = h("h4", { style: { marginBottom: "8px" } }, repos.length ? "Add another repo" : "Add a repo");
+    panel.appendChild(formTitle);
+
+    const form = h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", marginBottom: "8px" } });
+
+    const nameInput = h("input", {
+      type: "text", id: "doc-repo-name",
+      placeholder: "Repo name (e.g. fmb-docs)",
+      style: { flex: "1", minWidth: "140px", padding: "6px 10px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", fontSize: "13px" },
+    });
+    form.appendChild(nameInput);
+
+    const pathInput = h("input", {
+      type: "text", id: "doc-repo-path",
+      placeholder: "C:\\Users\\...\\repo-path",
+      style: { flex: "2", minWidth: "200px", padding: "6px 10px", borderRadius: "6px", border: "1px solid var(--border)", background: "var(--bg-secondary)", color: "var(--text-primary)", fontSize: "13px" },
+    });
+    form.appendChild(pathInput);
+
+    const addBtn = h("button", {
+      className: "btn btn-primary btn-sm",
+      style: { padding: "6px 16px" },
+      onclick: () => self._addRepo(),
+    }, "Add");
+    form.appendChild(addBtn);
+
+    panel.appendChild(form);
+
+    // Help text
+    panel.appendChild(h("p", { className: "text-muted", style: { fontSize: "11px", marginTop: "8px" } }, "Repos must be accessible git repositories on your local machine or network. Click Sync Now after saving to index the documentation."));
+  },
+
+  async _addRepo() {
+    const nameEl = document.getElementById("doc-repo-name");
+    const pathEl = document.getElementById("doc-repo-path");
+    const name = (nameEl ? nameEl.value.trim() : "");
+    const path = (pathEl ? pathEl.value.trim() : "");
+
+    if (!name || !path) {
+      toast("Repo name and path are required", "error");
+      return;
+    }
+
+    let repos = [];
+    try {
+      const settings = await api("/api/settings");
+      repos = settings.doc_repos || [];
+    } catch (e) { return; }
+
+    // Check for duplicate name
+    if (repos.some(r => r.name === name)) {
+      toast("A repo named '" + name + "' already exists", "error");
+      return;
+    }
+
+    repos.push({ name: name, path: path });
+    await this._saveRepos(repos);
+
+    if (nameEl) nameEl.value = "";
+    if (pathEl) pathEl.value = "";
+    toast("Repo '" + name + "' added. Click Sync Now to index.", "success");
+    this._renderSettingsPanel();
+    this._loadRepos();
+  },
+
+  async _removeRepo(index) {
+    let repos = [];
+    try {
+      const settings = await api("/api/settings");
+      repos = settings.doc_repos || [];
+    } catch (e) { return; }
+
+    const removed = repos[index] && repos[index].name || "repo";
+    repos.splice(index, 1);
+    await this._saveRepos(repos);
+
+    toast("Removed '" + removed + "'", "info");
+    this._renderSettingsPanel();
+    this._loadRepos();
+  },
+
+  async _saveRepos(repos) {
+    try {
+      await api("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ doc_repos: repos }),
+      });
+    } catch (e) {
+      toast("Failed to save settings", "error");
+      throw e;
+    }
   },
 });
