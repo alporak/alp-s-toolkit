@@ -106,4 +106,57 @@
 
 ---
 
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| EXTR-01 | Phase 5 | Pending |
+| EXTR-02 | Phase 5 | Pending |
+| EXTR-03 | Phase 5 | Pending |
+| EXTR-04 | Phase 5 | Pending |
+| EXTR-05 | Phase 5 | Pending |
+| INDEX-01 | Phase 5 | Pending |
+| INDEX-02 | Phase 5 | Pending |
+| INDEX-03 | Phase 5 | Pending |
+| INDEX-04 | Phase 5 | Pending |
+| INDEX-05 | Phase 5 | Pending |
+| SYNC-01 | Phase 6 | Pending |
+| SYNC-02 | Phase 6 | Pending |
+| SYNC-03 | Phase 6 | Pending |
+| SYNC-04 | Phase 6 | Pending |
+| SYNC-05 | Phase 6 | Pending |
+| SYNC-06 | Phase 6 | Pending |
+| SYNC-07 | Phase 6 | Pending |
+| SRCH-01 | Phase 6 | Pending |
+| SRCH-02 | Phase 6 | Pending |
+| SRCH-03 | Phase 6 | Pending |
+| SRCH-04 | Phase 6 | Pending |
+| SRCH-05 | Phase 6 | Pending |
+| SRCH-06 | Phase 6 | Pending |
+| UI-01 | Phase 7 | Pending |
+| UI-02 | Phase 7 | Pending |
+| UI-03 | Phase 7 | Pending |
+| UI-04 | Phase 7 | Pending |
+| UI-05 | Phase 7 | Pending |
+| UI-06 | Phase 7 | Pending |
+| UI-07 | Phase 7 | Pending |
+| UI-08 | Phase 7 | Pending |
+| UI-09 | Phase 7 | Pending |
+| UI-10 | Phase 7 | Pending |
+| UI-11 | Phase 7 | Pending |
+
+**Cross-Cutting NFRs (referenced in each phase, not assigned to a single phase):**
+
+| NFR | Referenced In | Status |
+|-----|---------------|--------|
+| NFR-12 | Phase 5, Phase 6 | Pending |
+| NFR-13 | Phase 6 | Pending |
+| NFR-14 | Phase 6 | Pending |
+| NFR-15 | Phase 5, Phase 6 | Pending |
+| NFR-16 | Phase 7 | Pending |
+| NFR-17 | Phase 7 | Pending |
+| NFR-18 | Phase 5 | Pending |
+
+---
+
 *Last updated: 2026-07-01 | M3 Requirements Approved*
