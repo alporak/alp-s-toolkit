@@ -7,9 +7,11 @@ and sorted by their `order` field.
 """
 
 import importlib
+import logging
 import os
 import pkgutil
 import sys
+from logging.handlers import RotatingFileHandler
 
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -20,6 +22,20 @@ from fastapi.responses import FileResponse
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+# ── File logging — captures crashes and warnings to disk ──────
+LOG_DIR = os.path.join(ROOT_DIR, "output")
+os.makedirs(LOG_DIR, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    os.path.join(LOG_DIR, "toolkit.log"),
+    maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+    datefmt="%H:%M:%S",
+))
+logging.getLogger().addHandler(_file_handler)
+logging.getLogger().setLevel(logging.INFO)
 
 from app.plugins.base import ToolkitPlugin
 
@@ -73,7 +89,10 @@ def create_app() -> FastAPI:
     _plugins = _discover_plugins()
     for p in _plugins:
         p.register_routes(app)
-        print(f"  {p.icon} {p.name} (/{p.id})")
+        try:
+            print(f"  {p.icon} {p.name} (/{p.id})")
+        except UnicodeEncodeError:
+            print(f"  ? {p.name} (/{p.id})")
 
     # ── API: plugin manifest for frontend navigation ─────────────────
     @app.get("/api/plugins")
