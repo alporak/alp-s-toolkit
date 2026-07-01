@@ -6,11 +6,11 @@
 
 ## EXTR: Text Extraction Pipeline
 
-- [ ] **EXTR-01**: Format dispatch table extracts text from 6 file types: .docx (python-docx), .pdf (pdfplumber), .doc (doc2txt), .rst (docutils), .drawio (xml.etree), .graphml (xml.etree)
-- [ ] **EXTR-02**: Each extracted text is validated — non-empty, non-BOM-only. Failures are logged but never crash the sync pipeline
-- [ ] **EXTR-03**: charset-normalizer detects encoding on all extracted text output; store detected encoding in metadata
-- [ ] **EXTR-04**: PDFs with pages > 0 but extracted text < 20 chars are flagged `needs_ocr: true` — no OCR performed, just detected
-- [ ] **EXTR-05**: Text extraction functions are pure (`file_path -> str`), independently testable without plugin infrastructure
+- [x] **EXTR-01**: Format dispatch table extracts text from 6 file types: .docx (python-docx), .pdf (pdfplumber), .doc (doc2txt), .rst (docutils), .drawio (xml.etree), .graphml (xml.etree)
+- [x] **EXTR-02**: Each extracted text is validated — non-empty, non-BOM-only. Failures are logged but never crash the sync pipeline
+- [x] **EXTR-03**: charset-normalizer detects encoding on all extracted text output; store detected encoding in metadata
+- [x] **EXTR-04**: PDFs with pages > 0 but extracted text < 20 chars are flagged `needs_ocr: true` — no OCR performed, just detected
+- [x] **EXTR-05**: Text extraction functions are pure (`file_path -> str`), independently testable without plugin infrastructure
 
 ---
 

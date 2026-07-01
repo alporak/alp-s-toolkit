@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: M3
 milestone_name: Documentation Search Engine
-status: planning
-last_updated: "2026-07-01T00:00:00.000Z"
-last_activity: 2026-07-01
+status: Phase 5 Plan 01 executed — extraction pipeline complete
+last_updated: "2026-07-01T14:20:00.000Z"
+last_activity: 2026-07-01 — Plan 05-01 executed (doc_extraction.py + dependencies)
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 6
+  completed_plans: 1
+  percent: 16
 ---
 
 # Project State
@@ -24,16 +24,19 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 ## Previous Milestones
 
 ### M1: Core Plugin (COMPLETE)
+
 - **Phase 1** — Backend: SQLite, Jira sync, state machine, stats/sync/chart API
 - **Phase 2** — Frontend: bar chart, sync button, status display
 
 ### M2: Performance Analytics v2 (COMPLETE)
+
 - **Phase 3** — Backend: extended schema (8-col transitions + tickets), 8 endpoints, attribution tracking
 - **Phase 4** — Frontend: tabbed power-dashboard, summary cards, per-ticket table, multi-chart views
 
 ## Key Decisions
 
 ### Inherited from M1/M2
+
 - Plugin autodiscovery: `app/plugins/` → module-level `plugin` attribute
 - SQLite: WAL mode, per-plugin database files
 - Frontend: Vanilla JS + `core.js` helpers (`h()`, `api()`, `registerPlugin()`)
@@ -41,6 +44,7 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 - HTTP: `httpx` async client
 
 ### M3-Specific
+
 - Search backend: SQLite FTS5 (not Whoosh) — already in stack, content-less tables supported
 - Git operations: `subprocess.run(["git", "pull"])` via `asyncio.to_thread()` (not GitPython)
 - PDF extraction: pdfplumber primary, pypdf fallback
@@ -62,35 +66,41 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 ## Current Position
 
 **Phase:** 5 — Extraction & Index Foundation
-**Plan:** TBD
-**Status:** Roadmap defined, awaiting plan
-**Last activity:** 2026-07-01 — ROADMAP.md created for M3
+**Plan:** 01 of 2 — COMPLETE
+**Status:** Plan 01 executed (extraction pipeline). Plan 02 pending (FTS5 schema + tests).
+**Last activity:** 2026-07-01 — `app/plugins/doc_extraction.py` created, 6 extraction deps installed
 
 ## Accumulated Context
 
 ### Open Decisions
+
 - DrawIO/GraphML extraction quality on real fixture files — spike needed during Phase 5
 - Scanned PDF percentage in target repos — determine real exclusion rate during Phase 5
 - charset-normalizer necessity — may be optional safety net if all docs are UTF-8
 
 ### Known Risks
+
 - Blocking the FastAPI event loop (#1 integration pitfall) — mitigated by `asyncio.to_thread()` + ThreadPoolExecutor
 - Silent PDF extraction failures on scanned docs — mitigated by `needs_ocr` detection
 - Legacy .doc encoding corruption (Windows-1257 Baltic) — mitigated by charset-normalizer
 
 ### Blockers
+
 - None
 
 ### TODOs
-- [ ] Phase 5: Plan extraction pipeline + FTS5 schema
+
+- [x] ~~Phase 5: Plan extraction pipeline + FTS5 schema~~
+- [x] Phase 5 Plan 01: Extraction pipeline complete
+- [ ] Phase 5 Plan 02: FTS5 schema & plugin foundation
 - [ ] Phase 6: Plan sync engine + search API
 - [ ] Phase 7: Plan frontend SPA
 
 ## Session Continuity
 
-- **Last session:** 2026-07-01 — Roadmap creation
-- **Next action:** `/gsd-plan-phase 5`
-- **Context needed:** Read ROADMAP.md Phase 5 section, research/SUMMARY.md Phase 5 research flags
+- **Last session:** 2026-07-01 — Plan 05-01 execution complete
+- **Next action:** `/gsd-execute-phase --plan 05-02`
+- **Context needed:** Read 05-01-SUMMARY.md, 05-02-PLAN.md, app/plugins/doc_extraction.py
 
 ---
 

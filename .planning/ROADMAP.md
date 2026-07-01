@@ -67,7 +67,7 @@ Strictly sequential. Phase 6 depends on the FTS5 schema and extraction pipeline 
 **Plans**: 2 plans in 2 waves
 
 Plans:
-- [ ] [05-01-PLAN.md](.planning/phases/05-extraction-index-foundation/05-01-PLAN.md) — Text Extraction Pipeline: 6 format extractors + charset detection + SHA-256 hashing (EXTR-01..05)
+- [x] [05-01-PLAN.md](.planning/phases/05-extraction-index-foundation/05-01-PLAN.md) — Text Extraction Pipeline: 6 format extractors + charset detection + SHA-256 hashing (EXTR-01..05)
 - [ ] [05-02-PLAN.md](.planning/phases/05-extraction-index-foundation/05-02-PLAN.md) — FTS5 Index Schema & Plugin Foundation: content-less FTS5 + doc_metadata + auto-migration + unit tests (INDEX-01..05)
 
 ---
