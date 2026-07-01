@@ -149,9 +149,18 @@ async def _git_pull(repo_path: str) -> dict:
 
 
 def _db_upsert_state(key: str, val) -> None:
-    """Store *val* as JSON under *key* in the sync_state table."""
+    """Store *val* as JSON under *key* in the sync_state table.
+
+    This is a blocking call — always run it via ``asyncio.to_thread()``
+    from async contexts to avoid SQLite corruption on the event-loop thread.
+    """
     encoded = json.dumps(val)
     _db_set(key, encoded)
+
+
+async def _adb_upsert_state(key: str, val) -> None:
+    """Async wrapper for :func:`_db_upsert_state` — runs on a thread."""
+    await asyncio.to_thread(_db_upsert_state, key, val)
 
 
 def _db_get_state(key: str):
@@ -378,6 +387,7 @@ async def _sync_repo(repo_name: str, repo_path: str) -> dict:
             }
 
             done_total = 0
+            last_progress_update = 0
             for future in concurrent.futures.as_completed(futures):
                 rel_path, full_path = futures[future]
                 try:
@@ -394,9 +404,10 @@ async def _sync_repo(repo_name: str, repo_path: str) -> dict:
                     logger.warning("Extraction failed for %s: %s", full_path, exc)
 
                 done_total += 1
-                # Update progress in sync_state periodically
-                if done_total % 5 == 0 or done_total == len(needs_change):
-                    _db_upsert_state("sync_progress", {
+                # Batch progress updates — only every 25 files and through a thread
+                if done_total - last_progress_update >= 25 or done_total == len(needs_change):
+                    last_progress_update = done_total
+                    await asyncio.to_thread(_db_upsert_state, "sync_progress", {
                         "phase": "indexing",
                         "repo": repo_name,
                         "done": done_total,
@@ -451,7 +462,7 @@ async def _sync_job() -> None:
                 logger.info("No doc repos configured; sync complete")
                 return
 
-            _db_upsert_state("sync_progress", {"phase": "starting"})
+            await _adb_upsert_state("sync_progress", {"phase": "starting"})
             logger.info("Sync job started — %d repo(s) configured", len(repos))
 
             for repo in repos:
@@ -459,7 +470,7 @@ async def _sync_job() -> None:
                 path = repo["path"]
 
                 # Phase: pulling
-                _db_upsert_state("sync_progress", {"phase": "pulling", "repo": name})
+                await _adb_upsert_state("sync_progress", {"phase": "pulling", "repo": name})
                 pull_result = await _git_pull(path)
                 logger.info(
                     "git pull %s: ok=%s (%s)",
@@ -468,7 +479,7 @@ async def _sync_job() -> None:
                 # Continue even on pull failure — files may still be on disk
 
                 # Phase: indexing
-                _db_upsert_state("sync_progress", {"phase": "indexing", "repo": name, "done": 0, "total": 0})
+                await _adb_upsert_state("sync_progress", {"phase": "indexing", "repo": name, "done": 0, "total": 0})
                 sync_result = await _sync_repo(name, path)
                 logger.info(
                     "sync %s: total=%d changed=%d deleted=%d errors=%d",
@@ -480,13 +491,13 @@ async def _sync_job() -> None:
                 )
 
             # Mark complete
-            _db_upsert_state("sync_progress", {"phase": "complete"})
-            _db_upsert_state("last_sync", datetime.now(timezone.utc).isoformat())
+            await _adb_upsert_state("sync_progress", {"phase": "complete"})
+            await _adb_upsert_state("last_sync", datetime.now(timezone.utc).isoformat())
             logger.info("Sync job complete")
 
         except Exception as exc:
             logger.error("Sync job failed: %s", exc)
-            _db_upsert_state("sync_progress", {"phase": "error", "error": str(exc)})
+            await _adb_upsert_state("sync_progress", {"phase": "error", "error": str(exc)})
         finally:
             # Lock released by 'async with' exiting
             pass
