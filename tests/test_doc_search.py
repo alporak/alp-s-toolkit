@@ -1191,23 +1191,11 @@ class TestSyncTriggerEndpoint:
         """POST /sync when lock held returns sync_already_running."""
         from app.plugins.doc_search import _sync_lock
 
-        # Acquire lock first (simulate sync in progress)
-        async def _acquire_and_test():
-            await _sync_lock.acquire()
-            # Now POST should detect lock is held
-
-        asyncio.run(_acquire_and_test())
-
-        try:
+        with patch.object(_sync_lock, "locked", return_value=True):
             response = search_client.post("/api/doc_search/sync")
             assert response.status_code == 200
             data = response.json()
             assert data["status"] == "sync_already_running"
-        finally:
-            # Release lock
-            async def _release():
-                _sync_lock.release()
-            asyncio.run(_release())
 
 
 class TestSyncStatusEndpoint:
@@ -1250,45 +1238,37 @@ class TestSyncStatusEndpoint:
             assert data["progress"] is None
             assert data["last_sync"] is None
 
-    def test_status_reflects_ongoing_sync(self, search_client):
+    def test_status_reflects_ongoing_sync(self, integration_db):
         """When sync is in progress, in_progress is true and progress has values."""
-        from app.plugins.doc_search import _sync_lock, _db_upsert_state
+        from app.plugins.doc_search import _sync_lock
 
-        # Simulate ongoing sync by seeding progress and holding the lock
-        _db_upsert_state("sync_progress", {
-            "phase": "indexing", "repo": "TestRepo", "done": 5, "total": 10,
-        })
+        # Seed progress state into the integration DB
+        with patch("app.plugins.doc_search.DB_PATH", integration_db):
+            from app.plugins.doc_search import _db_upsert_state
+            _db_upsert_state("sync_progress", {
+                "phase": "indexing", "repo": "TestRepo", "done": 5, "total": 10,
+            })
 
-        # Acquire lock to simulate in-progress state
-        async def _acquire():
-            await _sync_lock.acquire()
-        asyncio.run(_acquire())
+        # Re-create client with the updated DB + mock lock as held
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.plugins.doc_search import DocSearchPlugin
 
-        try:
-            # Re-create client with the updated DB
-            from fastapi import FastAPI
-            from fastapi.testclient import TestClient
-            from app.plugins.doc_search import DocSearchPlugin
+        app = FastAPI()
+        plugin = DocSearchPlugin()
+        plugin.register_routes(app)
+        client2 = TestClient(app)
 
-            app = FastAPI()
-            plugin = DocSearchPlugin()
-            plugin.register_routes(app)
-            client2 = TestClient(app)
-
-            with patch("app.plugins.doc_search.DB_PATH", integration_db), \
-                 patch("app.plugins.doc_search._sync_lock", _sync_lock):
-                response = client2.get("/api/doc_search/sync/status")
-                assert response.status_code == 200
-                data = response.json()
-                assert data["in_progress"] is True
-                assert data["progress"] is not None
-                assert data["progress"]["phase"] == "indexing"
-                assert data["progress"]["done"] == 5
-                assert data["progress"]["total"] == 10
-        finally:
-            async def _release():
-                _sync_lock.release()
-            asyncio.run(_release())
+        with patch("app.plugins.doc_search.DB_PATH", integration_db), \
+             patch.object(_sync_lock, "locked", return_value=True):
+            response = client2.get("/api/doc_search/sync/status")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["in_progress"] is True
+            assert data["progress"] is not None
+            assert data["progress"]["phase"] == "indexing"
+            assert data["progress"]["done"] == 5
+            assert data["progress"]["total"] == 10
 
 
 class TestStartupBackgroundSync:

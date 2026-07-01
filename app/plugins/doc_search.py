@@ -660,10 +660,62 @@ class DocSearchPlugin(ToolkitPlugin):
 
             return result
 
+        # ── Sync trigger endpoint ────────────────────────────
+
+        @app.post("/api/doc_search/sync")
+        async def doc_search_sync():
+            """Trigger a full doc repository sync in the background.
+
+            Returns immediately with ``sync_started``.  If a sync is
+            already running, returns ``sync_already_running`` (SYNC-07).
+            """
+            if _sync_lock.locked():
+                return {
+                    "status": "sync_already_running",
+                    "message": "A sync is already in progress.",
+                }
+
+            try:
+                asyncio.create_task(_sync_job())
+                logger.info("Sync triggered via POST /api/doc_search/sync")
+                return {
+                    "status": "sync_started",
+                    "message": "Doc sync running in background.",
+                }
+            except Exception as exc:
+                logger.error("Failed to start sync: %s", exc)
+                raise HTTPException(
+                    status_code=500,
+                    detail={"error": f"Failed to start sync: {exc}"},
+                )
+
+        # ── Sync status endpoint ─────────────────────────────
+
+        @app.get("/api/doc_search/sync/status")
+        async def doc_search_sync_status():
+            """Return current sync progress for polling-based UI updates.
+
+            Shape per SYNC-02:
+                ``{in_progress, progress: {phase, repo, done, total}|null, last_sync}``
+            """
+            progress = await asyncio.to_thread(_db_get_state, "sync_progress")
+            last_sync = await asyncio.to_thread(_db_get_state, "last_sync")
+
+            return {
+                "in_progress": _sync_lock.locked(),
+                "progress": progress,
+                "last_sync": last_sync,
+            }
+
     # ── Lifecycle hooks ─────────────────────────────────────
 
     def startup(self) -> None:
-        """Initialize SQLite schema on first run; skip migration if current."""
+        """Initialize SQLite schema on first run; skip migration if current.
+
+        After schema init, kicks off an initial background sync so the UI
+        shows ``Indexing...`` immediately without blocking startup.
+        """
+        schema_ok = False
         try:
             with _db_lock:
                 conn = _get_db()
@@ -680,50 +732,57 @@ class DocSearchPlugin(ToolkitPlugin):
                         "SELECT value FROM sync_state WHERE key = 'schema_version'"
                     ).fetchone()
                     if current_ver and current_ver["value"] == SCHEMA_VERSION:
-                        conn.close()
-                        logger.info(
-                            "DocSearch schema v%s already initialized", SCHEMA_VERSION
-                        )
-                        return
+                        schema_ok = True
+                    else:
+                        # 3. Execute full schema DDL
+                        conn.executescript("""
+                            CREATE TABLE IF NOT EXISTS doc_metadata (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                repo TEXT NOT NULL,
+                                relative_path TEXT NOT NULL,
+                                full_text TEXT NOT NULL DEFAULT '',
+                                sha256 TEXT NOT NULL DEFAULT '',
+                                encoding TEXT NOT NULL DEFAULT 'utf_8',
+                                needs_ocr INTEGER NOT NULL DEFAULT 0,
+                                last_extracted TEXT NOT NULL DEFAULT '',
+                                UNIQUE(repo, relative_path)
+                            );
 
-                    # 3. Execute full schema DDL
-                    conn.executescript("""
-                        CREATE TABLE IF NOT EXISTS doc_metadata (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            repo TEXT NOT NULL,
-                            relative_path TEXT NOT NULL,
-                            full_text TEXT NOT NULL DEFAULT '',
-                            sha256 TEXT NOT NULL DEFAULT '',
-                            encoding TEXT NOT NULL DEFAULT 'utf_8',
-                            needs_ocr INTEGER NOT NULL DEFAULT 0,
-                            last_extracted TEXT NOT NULL DEFAULT '',
-                            UNIQUE(repo, relative_path)
-                        );
+                            CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
+                                full_text,
+                                tokenize='unicode61'
+                            );
 
-                        CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
-                            full_text,
-                            tokenize='unicode61'
-                        );
+                            CREATE INDEX IF NOT EXISTS idx_doc_metadata_sha256
+                                ON doc_metadata(sha256);
+                            CREATE INDEX IF NOT EXISTS idx_doc_metadata_repo
+                                ON doc_metadata(repo);
 
-                        CREATE INDEX IF NOT EXISTS idx_doc_metadata_sha256
-                            ON doc_metadata(sha256);
-                        CREATE INDEX IF NOT EXISTS idx_doc_metadata_repo
-                            ON doc_metadata(repo);
-
-                        INSERT OR REPLACE INTO sync_state (key, value)
-                            VALUES ('schema_version', '1');
-                    """)
-                    conn.commit()
-
+                            INSERT OR REPLACE INTO sync_state (key, value)
+                                VALUES ('schema_version', '1');
+                        """)
+                        conn.commit()
+                        schema_ok = True
                 finally:
                     conn.close()
 
-            logger.info(
-                "DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH
-            )
+            if schema_ok:
+                logger.info(
+                    "DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH
+                )
 
         except Exception as e:
             logger.warning("DocSearch plugin DB init failed: %s", e)
+
+        # ── Kick off initial sync as background task (non-blocking) ──
+        # Per SYNC-05: fires after routes registered, UI loads immediately.
+        if schema_ok:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_sync_job())
+                logger.info("Initial doc sync started in background")
+            except RuntimeError:
+                logger.warning("No running event loop — skipping initial sync")
 
     def shutdown(self) -> None:
         """Cleanup hook — no async clients to close in Phase 5."""
