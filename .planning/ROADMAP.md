@@ -64,7 +64,11 @@ Strictly sequential. Phase 6 depends on the FTS5 schema and extraction pipeline 
   4. FTS5 index (`doc_search_fts`, content-less) and `doc_metadata` table are created on plugin startup with auto-migration — including SHA-256 hash, encoding, and needs_ocr columns
   5. Extraction functions are independently testable (`file_path → str`); files with unchanged SHA-256 hashes are correctly identified as not needing re-extraction
 
-**Plans**: TBD
+**Plans**: 2 plans in 2 waves
+
+Plans:
+- [ ] [05-01-PLAN.md](.planning/phases/05-extraction-index-foundation/05-01-PLAN.md) — Text Extraction Pipeline: 6 format extractors + charset detection + SHA-256 hashing (EXTR-01..05)
+- [ ] [05-02-PLAN.md](.planning/phases/05-extraction-index-foundation/05-02-PLAN.md) — FTS5 Index Schema & Plugin Foundation: content-less FTS5 + doc_metadata + auto-migration + unit tests (INDEX-01..05)
 
 ---
 
@@ -119,7 +123,7 @@ Strictly sequential. Phase 6 depends on the FTS5 schema and extraction pipeline 
 | 2. Frontend Dashboard | 1/1 | Complete | M1 |
 | 3. Backend Enhancements | 1/1 | Complete | M2 |
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
-| 5. Extraction & Index Foundation | 0/1 | Not started | - |
+| 5. Extraction & Index Foundation | 2/2 | Planning complete | - |
 | 6. Sync Engine & Search API | 0/1 | Not started | - |
 | 7. Frontend SPA | 0/1 | Not started | -
 
