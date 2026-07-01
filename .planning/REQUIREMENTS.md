@@ -49,17 +49,17 @@
 
 ## UI: Frontend SPA
 
-- [ ] **UI-01**: Search bar with 250ms debounce and AbortController (cancel in-flight request on new keystroke)
-- [ ] **UI-02**: Result list items show: file type icon, filename, repo badge (color-coded), highlighted snippet with `<mark>` tags, relevance score
-- [ ] **UI-03**: Inline preview panel: clicking a result expands accordion showing first ~500 chars of extracted text with search term highlights
-- [ ] **UI-04**: Sync button with progress bar polling `GET /sync/status` every 2s during active sync
-- [ ] **UI-05**: File-type filter chips (docx, pdf, doc, rst, drawio, graphml) — click toggles visibility
-- [ ] **UI-06**: Repo scope indicator: "Searching N repos: repo1 (X files), repo2 (Y files)"
-- [ ] **UI-07**: Keyboard navigation: Arrow Up/Down to move focus, Enter to expand preview, Escape to clear search / close preview
-- [ ] **UI-08**: Empty states: "No results found for '{query}'", "Index building... Click Sync Now", "0 repos configured — add repos in settings"
-- [ ] **UI-09**: Loading spinner during search requests; error toast on sync or search failure
-- [ ] **UI-10**: Plugin registered via `core.js` `registerPlugin({id, name, icon, order, init, destroy})`; single line added to `app.js`: `import "./doc_search.js"`
-- [ ] **UI-11**: XSS protection: all user content (filenames, snippets, extracted text) rendered via textContent or sanitized before innerHTML; search term `<mark>` wrapping uses DOM manipulation, not string concatenation
+- [x] **UI-01**: Search bar with 250ms debounce and AbortController (cancel in-flight request on new keystroke)
+- [x] **UI-02**: Result list items show: file type icon, filename, repo badge (color-coded), highlighted snippet with `<mark>` tags, relevance score
+- [x] **UI-03**: Inline preview panel: clicking a result expands accordion showing first ~500 chars of extracted text with search term highlights
+- [x] **UI-04**: Sync button with progress bar polling `GET /sync/status` every 2s during active sync
+- [x] **UI-05**: File-type filter chips (docx, pdf, doc, rst, drawio, graphml) — click toggles visibility
+- [x] **UI-06**: Repo scope indicator: "Searching N repos: repo1 (X files), repo2 (Y files)"
+- [x] **UI-07**: Keyboard navigation: Arrow Up/Down to move focus, Enter to expand preview, Escape to clear search / close preview
+- [x] **UI-08**: Empty states: "No results found for '{query}'", "Index building... Click Sync Now", "0 repos configured — add repos in settings"
+- [x] **UI-09**: Loading spinner during search requests; error toast on sync or search failure
+- [x] **UI-10**: Plugin registered via `core.js` `registerPlugin({id, name, icon, order, init, destroy})`; single line added to `app.js`: `import "./doc_search.js"`
+- [x] **UI-11**: XSS protection: all user content (filenames, snippets, extracted text) rendered via textContent or sanitized before innerHTML; search term `<mark>` wrapping uses DOM manipulation, not string concatenation
 
 ---
 
@@ -133,17 +133,17 @@
 | SRCH-04 | Phase 6 | Complete |
 | SRCH-05 | Phase 6 | Complete |
 | SRCH-06 | Phase 6 | Complete |
-| UI-01 | Phase 7 | Pending |
-| UI-02 | Phase 7 | Pending |
-| UI-03 | Phase 7 | Pending |
-| UI-04 | Phase 7 | Pending |
-| UI-05 | Phase 7 | Pending |
-| UI-06 | Phase 7 | Pending |
-| UI-07 | Phase 7 | Pending |
-| UI-08 | Phase 7 | Pending |
-| UI-09 | Phase 7 | Pending |
-| UI-10 | Phase 7 | Pending |
-| UI-11 | Phase 7 | Pending |
+| UI-01 | Phase 7 | Complete |
+| UI-02 | Phase 7 | Complete |
+| UI-03 | Phase 7 | Complete |
+| UI-04 | Phase 7 | Complete |
+| UI-05 | Phase 7 | Complete |
+| UI-06 | Phase 7 | Complete |
+| UI-07 | Phase 7 | Complete |
+| UI-08 | Phase 7 | Complete |
+| UI-09 | Phase 7 | Complete |
+| UI-10 | Phase 7 | Complete |
+| UI-11 | Phase 7 | Complete |
 
 **Cross-Cutting NFRs (referenced in each phase, not assigned to a single phase):**
 
