@@ -231,34 +231,41 @@ def _upsert_document(conn: sqlite3.Connection, repo: str, rel_path: str, result:
     encoding = result.get("encoding", "utf_8") or "utf_8"
     needs_ocr = 1 if result.get("needs_ocr") else 0
 
-    conn.execute(
-        """INSERT INTO doc_metadata (repo, relative_path, full_text, sha256,
-           encoding, needs_ocr, last_extracted)
-           VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
-           ON CONFLICT(repo, relative_path) DO UPDATE SET
-             full_text=excluded.full_text,
-             sha256=excluded.sha256,
-             encoding=excluded.encoding,
-             needs_ocr=excluded.needs_ocr,
-             last_extracted=excluded.last_extracted""",
-        (repo, rel_path, text, sha, encoding, needs_ocr),
-    )
+    # Wrap in explicit transaction so DELETE+INSERT on FTS5 are atomic
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            """INSERT INTO doc_metadata (repo, relative_path, full_text, sha256,
+               encoding, needs_ocr, last_extracted)
+               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(repo, relative_path) DO UPDATE SET
+                 full_text=excluded.full_text,
+                 sha256=excluded.sha256,
+                 encoding=excluded.encoding,
+                 needs_ocr=excluded.needs_ocr,
+                 last_extracted=excluded.last_extracted""",
+            (repo, rel_path, text, sha, encoding, needs_ocr),
+        )
 
-    # Retrieve the rowid for the (repo, relative_path) pair
-    fetched = conn.execute(
-        "SELECT id FROM doc_metadata WHERE repo = ? AND relative_path = ?",
-        (repo, rel_path),
-    ).fetchone()
-    if fetched is None:
-        raise RuntimeError(f"Failed to retrieve rowid after upsert for {repo}/{rel_path}")
-    rowid = fetched["id"]
+        # Retrieve the rowid for the (repo, relative_path) pair
+        fetched = conn.execute(
+            "SELECT id FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+            (repo, rel_path),
+        ).fetchone()
+        if fetched is None:
+            raise RuntimeError(f"Failed to retrieve rowid after upsert for {repo}/{rel_path}")
+        rowid = fetched["id"]
 
-    # Content-less FTS5 update: delete old entry, insert new
-    conn.execute("DELETE FROM doc_search_fts WHERE rowid = ?", (rowid,))
-    conn.execute(
-        "INSERT INTO doc_search_fts(rowid, full_text) VALUES (?, ?)",
-        (rowid, text),
-    )
+        # Content-less FTS5 update: delete old entry, insert new
+        conn.execute("DELETE FROM doc_search_fts WHERE rowid = ?", (rowid,))
+        conn.execute(
+            "INSERT INTO doc_search_fts(rowid, full_text) VALUES (?, ?)",
+            (rowid, text),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     return rowid
 
@@ -457,6 +464,9 @@ async def _sync_job() -> None:
 
     async with _sync_lock:
         try:
+            # Ensure schema exists (DB may have been auto-recovered from corruption)
+            await asyncio.to_thread(_ensure_schema)
+
             repos = _load_doc_repos()
             if not repos:
                 logger.info("No doc repos configured; sync complete")
@@ -506,6 +516,59 @@ async def _sync_job() -> None:
 # ═══════════════════════════════════════════════════════════
 #  Plugin class
 # ═══════════════════════════════════════════════════════════
+
+
+def _ensure_schema() -> None:
+    """Ensure the SQLite schema exists — idempotent, safe to call repeatedly.
+
+    Creates tables if missing; skips if schema_version matches.
+    Must be called with ``_db_lock`` held or from a single thread.
+    """
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS sync_state "
+                "(key TEXT PRIMARY KEY, value TEXT)"
+            )
+
+            current_ver = conn.execute(
+                "SELECT value FROM sync_state WHERE key = 'schema_version'"
+            ).fetchone()
+            if current_ver and current_ver["value"] == SCHEMA_VERSION:
+                conn.commit()
+                return
+
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS doc_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    full_text TEXT NOT NULL DEFAULT '',
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    encoding TEXT NOT NULL DEFAULT 'utf_8',
+                    needs_ocr INTEGER NOT NULL DEFAULT 0,
+                    last_extracted TEXT NOT NULL DEFAULT '',
+                    UNIQUE(repo, relative_path)
+                );
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
+                    full_text,
+                    tokenize='unicode61'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_doc_metadata_sha256
+                    ON doc_metadata(sha256);
+                CREATE INDEX IF NOT EXISTS idx_doc_metadata_repo
+                    ON doc_metadata(repo);
+
+                INSERT OR REPLACE INTO sync_state (key, value)
+                    VALUES ('schema_version', '1');
+            """)
+            conn.commit()
+            logger.info("DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH)
+        finally:
+            conn.close()
 
 class DocSearchPlugin(ToolkitPlugin):
     id = "doc_search"
@@ -726,86 +789,28 @@ class DocSearchPlugin(ToolkitPlugin):
         After schema init, kicks off an initial background sync so the UI
         shows ``Indexing...`` immediately without blocking startup.
         """
-        schema_ok = False
         try:
-            with _db_lock:
-                conn = _get_db()
-                try:
-                    # 1. Ensure sync_state table exists
-                    conn.execute(
-                        "CREATE TABLE IF NOT EXISTS sync_state "
-                        "(key TEXT PRIMARY KEY, value TEXT)"
-                    )
-                    conn.commit()
-
-                    # 2. Check current schema version
-                    current_ver = conn.execute(
-                        "SELECT value FROM sync_state WHERE key = 'schema_version'"
-                    ).fetchone()
-                    if current_ver and current_ver["value"] == SCHEMA_VERSION:
-                        schema_ok = True
-                    else:
-                        # 3. Execute full schema DDL
-                        conn.executescript("""
-                            CREATE TABLE IF NOT EXISTS doc_metadata (
-                                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                repo TEXT NOT NULL,
-                                relative_path TEXT NOT NULL,
-                                full_text TEXT NOT NULL DEFAULT '',
-                                sha256 TEXT NOT NULL DEFAULT '',
-                                encoding TEXT NOT NULL DEFAULT 'utf_8',
-                                needs_ocr INTEGER NOT NULL DEFAULT 0,
-                                last_extracted TEXT NOT NULL DEFAULT '',
-                                UNIQUE(repo, relative_path)
-                            );
-
-                            CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
-                                full_text,
-                                tokenize='unicode61'
-                            );
-
-                            CREATE INDEX IF NOT EXISTS idx_doc_metadata_sha256
-                                ON doc_metadata(sha256);
-                            CREATE INDEX IF NOT EXISTS idx_doc_metadata_repo
-                                ON doc_metadata(repo);
-
-                            INSERT OR REPLACE INTO sync_state (key, value)
-                                VALUES ('schema_version', '1');
-                        """)
-                        conn.commit()
-                        schema_ok = True
-                finally:
-                    conn.close()
-
-            if schema_ok:
-                logger.info(
-                    "DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH
-                )
-
+            _ensure_schema()
         except sqlite3.DatabaseError as e:
             logger.warning("DocSearch plugin DB init failed (corrupt?): %s", e)
             # Auto-recover by deleting the corrupted DB and recreating
             try:
-                conn.close()
-            except Exception:
-                pass
-            try:
                 os.remove(DB_PATH)
-                logger.info("Removed corrupted DB at %s — will recreate on next restart", DB_PATH)
+                logger.info("Removed corrupted DB at %s — will recreate on next sync", DB_PATH)
             except Exception as rm_err:
                 logger.warning("Could not remove corrupted DB: %s", rm_err)
         except Exception as e:
             logger.warning("DocSearch plugin DB init failed: %s", e)
+            return
 
         # ── Kick off initial sync as background task (non-blocking) ──
         # Per SYNC-05: fires after routes registered, UI loads immediately.
-        if schema_ok:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_sync_job())
-                logger.info("Initial doc sync started in background")
-            except RuntimeError:
-                logger.warning("No running event loop — skipping initial sync")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_sync_job())
+            logger.info("Initial doc sync started in background")
+        except RuntimeError:
+            logger.warning("No running event loop — skipping initial sync")
 
     def shutdown(self) -> None:
         """Cleanup hook — no async clients to close in Phase 5."""
