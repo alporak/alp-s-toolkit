@@ -782,6 +782,18 @@ class DocSearchPlugin(ToolkitPlugin):
                     "DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH
                 )
 
+        except sqlite3.DatabaseError as e:
+            logger.warning("DocSearch plugin DB init failed (corrupt?): %s", e)
+            # Auto-recover by deleting the corrupted DB and recreating
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                os.remove(DB_PATH)
+                logger.info("Removed corrupted DB at %s — will recreate on next restart", DB_PATH)
+            except Exception as rm_err:
+                logger.warning("Could not remove corrupted DB: %s", rm_err)
         except Exception as e:
             logger.warning("DocSearch plugin DB init failed: %s", e)
 
