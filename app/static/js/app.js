@@ -9,6 +9,8 @@ import "./com.js";
 import "./jira.js";
 import "./release.js";
 import "./universal_tester_tool.js";
+import "./competence.js";
+import "./doc_search.js";
 
 document.addEventListener("DOMContentLoaded", boot);
 
