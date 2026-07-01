@@ -28,11 +28,11 @@
 
 - [ ] **SYNC-01**: `POST /api/doc_search/sync` triggers async background sync task (fires `asyncio.create_task()`, returns immediately)
 - [ ] **SYNC-02**: `GET /api/doc_search/sync/status` returns `{phase, done, total, error}` — polling pattern from competence plugin
-- [ ] **SYNC-03**: Git pull from 3 configured repos via `subprocess.run(["git", "pull"])` wrapped in `asyncio.to_thread()`
-- [ ] **SYNC-04**: Incremental mode: walk repo, compare file hashes, extract+index only new/changed files, delete entries for removed files
+- [x] **SYNC-03**: Git pull from 3 configured repos via `subprocess.run(["git", "pull"])` wrapped in `asyncio.to_thread()`
+- [x] **SYNC-04**: Incremental mode: walk repo, compare file hashes, extract+index only new/changed files, delete entries for removed files
 - [ ] **SYNC-05**: `startup()` kicks off initial sync as background task (non-blocking — UI loads immediately with "Indexing..." status)
-- [ ] **SYNC-06**: Repo paths configured via `toolkit_settings.json` (follows existing config patterns)
-- [ ] **SYNC-07**: Sync `in_progress` guard prevents concurrent sync runs (config.json pattern from competence)
+- [x] **SYNC-06**: Repo paths configured via `toolkit_settings.json` (follows existing config patterns)
+- [x] **SYNC-07**: Sync `in_progress` guard prevents concurrent sync runs (config.json pattern from competence)
 
 ---
 
@@ -43,7 +43,7 @@
 - [ ] **SRCH-03**: `GET /api/doc_search/preview/{repo}/{path:path}` returns full extracted text; path traversal protection via `os.path.realpath()` validation
 - [ ] **SRCH-04**: `GET /api/doc_search/repos` returns configured repo list with file counts and last synced timestamps
 - [ ] **SRCH-05**: Empty query returns empty results (no error); no results returns `{results: [], total: 0}`
-- [ ] **SRCH-06**: Subprocess injection prevention: git commands use argument lists (not shell strings)
+- [x] **SRCH-06**: Subprocess injection prevention: git commands use argument lists (not shell strings)
 
 ---
 
@@ -122,17 +122,17 @@
 | INDEX-05 | Phase 5 | Pending |
 | SYNC-01 | Phase 6 | Pending |
 | SYNC-02 | Phase 6 | Pending |
-| SYNC-03 | Phase 6 | Pending |
-| SYNC-04 | Phase 6 | Pending |
+| SYNC-03 | Phase 6 | Complete |
+| SYNC-04 | Phase 6 | Complete |
 | SYNC-05 | Phase 6 | Pending |
-| SYNC-06 | Phase 6 | Pending |
-| SYNC-07 | Phase 6 | Pending |
+| SYNC-06 | Phase 6 | Complete |
+| SYNC-07 | Phase 6 | Complete |
 | SRCH-01 | Phase 6 | Pending |
 | SRCH-02 | Phase 6 | Pending |
 | SRCH-03 | Phase 6 | Pending |
 | SRCH-04 | Phase 6 | Pending |
 | SRCH-05 | Phase 6 | Pending |
-| SRCH-06 | Phase 6 | Pending |
+| SRCH-06 | Phase 6 | Complete |
 | UI-01 | Phase 7 | Pending |
 | UI-02 | Phase 7 | Pending |
 | UI-03 | Phase 7 | Pending |
@@ -149,7 +149,7 @@
 
 | NFR | Referenced In | Status |
 |-----|---------------|--------|
-| NFR-12 | Phase 5, Phase 6 | Pending |
+| NFR-12 | Phase 5, Phase 6 | Complete |
 | NFR-13 | Phase 6 | Pending |
 | NFR-14 | Phase 6 | Pending |
 | NFR-15 | Phase 5, Phase 6 | Pending |

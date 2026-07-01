@@ -128,7 +128,7 @@ Plans:
 | 3. Backend Enhancements | 1/1 | Complete | M2 |
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
 | 5. Extraction & Index Foundation | 2/2 | Complete | 2026-07-01 |
-| 6. Sync Engine & Search API | 0/2 | Planned | 2026-07-01 |
+| 6. Sync Engine & Search API | 1/2 | In Progress|  |
 | 7. Frontend SPA | 0/1 | Not started | -
 
 ---
