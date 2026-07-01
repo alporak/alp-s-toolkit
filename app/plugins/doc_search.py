@@ -385,48 +385,51 @@ async def _sync_repo(repo_name: str, repo_path: str) -> dict:
                 finally:
                     conn.close()
 
-        # Run extractions in thread pool (max_workers=2 to limit memory)
-        # 4 simultaneous PDF extractions can OOM on large files
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-            # Submit all extraction tasks
-            futures = {
-                pool.submit(_extract_one, full_path): (rel_path, full_path)
-                for rel_path, full_path, _sha in needs_change
-            }
+        # Process in batches to limit memory — futures + extracted text accumulate
+        BATCH_SIZE = 100
+        changed_files = [(rel_path, full_path, _sha) for rel_path, full_path, _sha in needs_change]
+        changed_count = 0
+        done_total = 0
+        last_progress_update = 0
 
-            done_total = 0
-            last_progress_update = 0
-            for future in concurrent.futures.as_completed(futures):
-                rel_path, full_path = futures[future]
-                try:
-                    extr_result = await asyncio.to_thread(future.result)
-                    err = extr_result.get("error")
-                    if err:
-                        errors.append(f"{rel_path}: {err}")
-                    else:
-                        # Upsert into DB (blocking — run in thread)
-                        await asyncio.to_thread(_upsert_batch, rel_path, extr_result)
-                        changed_count += 1
-                except Exception as exc:
-                    errors.append(f"{rel_path}: extraction crashed: {exc}")
-                    logger.warning("Extraction failed for %s: %s", full_path, exc)
+        for batch_start in range(0, len(changed_files), BATCH_SIZE):
+            batch = changed_files[batch_start:batch_start + BATCH_SIZE]
 
-                done_total += 1
-                # Log progress every 100 files so we can pinpoint OOM location
-                if done_total % 100 == 0 or done_total == len(needs_change):
-                    logger.info(
-                        "Repo '%s': indexed %d/%d files (%d errors so far)",
-                        repo_name, done_total, len(needs_change), len(errors),
-                    )
-                # Batch progress updates — only every 50 files and through a thread
-                if done_total - last_progress_update >= 50 or done_total == len(needs_change):
-                    last_progress_update = done_total
-                    await asyncio.to_thread(_db_upsert_state, "sync_progress", {
-                        "phase": "indexing",
-                        "repo": repo_name,
-                        "done": done_total,
-                        "total": len(needs_change),
-                    })
+            # Submit batch to thread pool
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = {
+                    pool.submit(_extract_one, full_path): (rel_path, full_path)
+                    for rel_path, full_path, _sha in batch
+                }
+
+                for future in concurrent.futures.as_completed(futures):
+                    rel_path, full_path = futures[future]
+                    try:
+                        extr_result = await asyncio.to_thread(future.result)
+                        err = extr_result.get("error")
+                        if err:
+                            errors.append(f"{rel_path}: {err}")
+                        else:
+                            await asyncio.to_thread(_upsert_batch, rel_path, extr_result)
+                            changed_count += 1
+                    except Exception as exc:
+                        errors.append(f"{rel_path}: extraction crashed: {exc}")
+                        logger.warning("Extraction failed for %s: %s", full_path, exc)
+
+                    done_total += 1
+                    if done_total % 100 == 0 or done_total == len(needs_change):
+                        logger.info(
+                            "Repo '%s': indexed %d/%d files (%d errors so far)",
+                            repo_name, done_total, len(needs_change), len(errors),
+                        )
+                    if done_total - last_progress_update >= 50 or done_total == len(needs_change):
+                        last_progress_update = done_total
+                        await asyncio.to_thread(_db_upsert_state, "sync_progress", {
+                            "phase": "indexing",
+                            "repo": repo_name,
+                            "done": done_total,
+                            "total": len(needs_change),
+                        })
 
     # 3. Cleanup deleted files
     def _do_cleanup() -> int:

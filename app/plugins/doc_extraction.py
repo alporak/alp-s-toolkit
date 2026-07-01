@@ -343,7 +343,7 @@ def extract_text(file_path: str) -> dict:
     extractor = EXTRACTORS.get(ext)
     if extractor is None:
         result["error"] = f"Unsupported format: {ext}"
-        logger.warning("Unsupported format for extraction: %s (%s)", file_path, ext)
+        logger.debug("Unsupported format for extraction: %s (%s)", file_path, ext)
         return result
 
     # 4. Call extractor (must never raise)
