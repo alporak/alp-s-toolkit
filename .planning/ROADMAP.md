@@ -30,7 +30,7 @@ This roadmap spans three milestones:
 ## Phases
 
 - [x] **Phase 5: Extraction & Index Foundation** — Text extraction pipeline for 6 formats + FTS5 index schema with content-less tables
-- [ ] **Phase 6: Sync Engine & Search API** — Git sync with incremental updates + FTS5 search API with BM25 ranking
+- [x] **Phase 6: Sync Engine & Search API** — Git sync with incremental updates + FTS5 search API with BM25 ranking (completed 2026-07-01)
 - [ ] **Phase 7: Frontend SPA** — Search UI with debounced search-as-you-type, inline preview, file-type filters, keyboard navigation
 
 ---
@@ -128,7 +128,7 @@ Plans:
 | 3. Backend Enhancements | 1/1 | Complete | M2 |
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
 | 5. Extraction & Index Foundation | 2/2 | Complete | 2026-07-01 |
-| 6. Sync Engine & Search API | 1/2 | In Progress|  |
+| 6. Sync Engine & Search API | 2/2 | Complete   | 2026-07-01 |
 | 7. Frontend SPA | 0/1 | Not started | -
 
 ---
