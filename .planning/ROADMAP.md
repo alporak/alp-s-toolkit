@@ -89,7 +89,11 @@ Plans:
   4. User searches via `GET /search?q=term` → receives BM25-ranked results within 200ms showing repo, filename, highlighted snippet, and score; empty query returns empty results gracefully
   5. User requests a preview via `GET /preview/{repo}/{path}` → receives extracted text; path traversal attacks (`../`) return 403, not file content
 
-**Plans**: TBD
+**Plans**: 2 plans in 2 waves
+
+Plans:
+- [ ] [06-01-PLAN.md](.planning/phases/06-sync-engine-search-api/06-01-PLAN.md) — Sync Engine Core: config loading, git pull, incremental file walking, hash comparison, FTS5 upsert, cleanup (SYNC-03, SYNC-04, SYNC-06, SYNC-07, SRCH-06)
+- [ ] [06-02-PLAN.md](.planning/phases/06-sync-engine-search-api/06-02-PLAN.md) — Search API & Routes: search/preview/repos endpoints, sync endpoints, startup background sync (SYNC-01, SYNC-02, SYNC-05, SRCH-01..05, NFR-13, NFR-14)
 
 ---
 
@@ -124,7 +128,7 @@ Plans:
 | 3. Backend Enhancements | 1/1 | Complete | M2 |
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
 | 5. Extraction & Index Foundation | 2/2 | Complete | 2026-07-01 |
-| 6. Sync Engine & Search API | 0/1 | Not started | - |
+| 6. Sync Engine & Search API | 0/2 | Planned | 2026-07-01 |
 | 7. Frontend SPA | 0/1 | Not started | -
 
 ---
