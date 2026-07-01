@@ -19,12 +19,13 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import sqlite3
 import subprocess
 import threading
 from datetime import datetime, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Path, Query
 
 from app import config
 from app.plugins.base import ToolkitPlugin
@@ -171,6 +172,21 @@ def _db_get_state(key: str):
 # ── Sync lock (module-level) ─────────────────────────────────
 
 _sync_lock = asyncio.Lock()
+
+
+# ═══════════════════════════════════════════════════════════
+#  XSS sanitization helper
+# ═══════════════════════════════════════════════════════════
+
+def _sanitize_html(text: str) -> str:
+    """Strip HTML tags from *text* to prevent XSS in search results.
+
+    Applied to snippet output before returning in JSON responses.
+    FTS5 snippet() may preserve custom markers like ``<mark>`` which
+    are re-added by the frontend via DOM manipulation — stripping
+    all tags here ensures no malicious HTML survives.
+    """
+    return re.sub(r"<[^>]*>", "", text)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -505,6 +521,144 @@ class DocSearchPlugin(ToolkitPlugin):
                     "status": "error",
                     "schema_version": "unknown",
                 }
+
+        # ── Search endpoint ──────────────────────────────────
+
+        @app.get("/api/doc_search/search")
+        async def doc_search(q: str = Query("", description="FTS5 search query")):
+            """Full-text search across indexed documents using BM25 ranking.
+
+            Supports FTS5 query syntax: AND, OR, phrase queries, prefix
+            queries.  Empty query returns empty results gracefully.
+            """
+            query = q.strip()
+            if not query:
+                return {"results": [], "total": 0, "query": q}
+
+            def _run_search() -> list[dict]:
+                conn = _get_db()
+                try:
+                    try:
+                        rows = conn.execute("""
+                            SELECT
+                                m.repo, m.relative_path, m.needs_ocr,
+                                snippet(doc_search_fts, 0, '<mark>', '</mark>', '...', 32) AS snippet,
+                                bm25(doc_search_fts) AS score
+                            FROM doc_search_fts
+                            JOIN doc_metadata m ON m.id = doc_search_fts.rowid
+                            WHERE doc_search_fts MATCH ?
+                            ORDER BY score
+                            LIMIT 50
+                        """, (query,)).fetchall()
+                    except sqlite3.OperationalError:
+                        logger.warning("FTS5 query failed, returning empty: %r", query)
+                        return []
+                    return [dict(r) for r in rows]
+                finally:
+                    conn.close()
+
+            rows = await asyncio.to_thread(_run_search)
+
+            results: list[dict] = []
+            for row in rows:
+                path = row["relative_path"]
+                raw_snippet = row["snippet"] or ""
+                snippet_text = _sanitize_html(raw_snippet)
+                results.append({
+                    "repo": row["repo"],
+                    "path": path,
+                    "filename": os.path.basename(path),
+                    "snippet": snippet_text,
+                    "score": float(row["score"]),
+                    "needs_ocr": bool(row["needs_ocr"]),
+                    "file_type": os.path.splitext(path)[1].lstrip(".").lower(),
+                })
+
+            # Store last_search timestamp (non-blocking in thread)
+            await asyncio.to_thread(
+                _db_upsert_state, "last_search",
+                datetime.now(timezone.utc).isoformat(),
+            )
+
+            return {"results": results, "total": len(results), "query": q}
+
+        # ── Preview endpoint ─────────────────────────────────
+
+        @app.get("/api/doc_search/preview/{repo}/{path:path}")
+        async def doc_search_preview(repo: str, path: str = Path(..., description="Document relative path")):
+            """Return extracted text preview with path-traversal protection.
+
+            Resolves the full path with ``os.path.realpath()`` and verifies the
+            result is within the configured repo root.  Returns 403 for any
+            path-traversal attempt (NFR-13).
+            """
+            # Load repo config
+            repos = _load_doc_repos()
+            repo_entry = next((r for r in repos if r["name"] == repo), None)
+            if repo_entry is None:
+                raise HTTPException(status_code=404, detail={"error": "Repo not found"})
+
+            repo_root = repo_entry["path"]
+            full_path = os.path.join(repo_root, path)
+            resolved = os.path.realpath(full_path)
+            real_root = os.path.realpath(repo_root)
+
+            # Path traversal protection (NFR-13)
+            if not (resolved == real_root or resolved.startswith(real_root + os.sep)):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "Path traversal detected"},
+                )
+
+            def _run_preview() -> str | None:
+                conn = _get_db()
+                try:
+                    row = conn.execute(
+                        "SELECT full_text FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+                        (repo, path),
+                    ).fetchone()
+                    return row["full_text"] if row else None
+                finally:
+                    conn.close()
+
+            text = await asyncio.to_thread(_run_preview)
+            if text is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error": "Document not found in index"},
+                )
+
+            return {"repo": repo, "path": path, "text": text[:2000]}
+
+        # ── Repos endpoint ───────────────────────────────────
+
+        @app.get("/api/doc_search/repos")
+        async def doc_search_repos():
+            """List configured repos with file counts and last-synced timestamps."""
+            def _run_repo_counts() -> dict[str, int]:
+                conn = _get_db()
+                try:
+                    rows = conn.execute(
+                        "SELECT repo, COUNT(*) as file_count FROM doc_metadata GROUP BY repo"
+                    ).fetchall()
+                    return {r["repo"]: r["file_count"] for r in rows}
+                finally:
+                    conn.close()
+
+            counts = await asyncio.to_thread(_run_repo_counts)
+            repos = _load_doc_repos()
+            last_synced = await asyncio.to_thread(_db_get_state, "last_sync")
+
+            result: list[dict] = []
+            for repo in repos:
+                result.append({
+                    "name": repo["name"],
+                    "path": repo["path"],
+                    "file_count": counts.get(repo["name"], 0),
+                    "last_synced": last_synced,
+                })
+
+            return result
 
     # ── Lifecycle hooks ─────────────────────────────────────
 
