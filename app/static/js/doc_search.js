@@ -51,6 +51,7 @@ registerPlugin({
   _syncStatus: null,
   _repoScope: null,
   _filterRow: null,
+  _progressPanel: null,
 
   // ═══════════════════════════════════════════════════════
   //  Lifecycle
@@ -82,6 +83,7 @@ registerPlugin({
     this._repoScope = null;
     this._filterRow = null;
     this._settingsBtn = null;
+    this._progressPanel = null;
   },
 
   // ═══════════════════════════════════════════════════════
@@ -138,6 +140,14 @@ registerPlugin({
     header.appendChild(settingsBtn);
     header.appendChild(syncStatus);
     c.appendChild(header);
+
+    // ── Sync progress bar panel (hidden by default) ──────
+    const progressPanel = h("div", {
+      id: "doc-sync-progress",
+      style: { display: "none", marginBottom: "16px", padding: "10px 14px", border: "1px solid var(--border)", borderRadius: "8px", background: "var(--bg-secondary)" },
+    });
+    this._progressPanel = progressPanel;
+    c.appendChild(progressPanel);
 
     // ── Settings panel (hidden by default) ────────────────
     const settingsPanel = h("div", {
@@ -706,18 +716,34 @@ registerPlugin({
 
     if (status.in_progress) {
       const p = status.progress;
-      let text = "Syncing...";
+      let phase = "Syncing";
+      let detail = "";
+      let done = 0;
+      let total = 0;
+
       if (p) {
         if (p.phase === "pulling") {
-          text = "Pulling " + (p.repo || "") + "...";
+          phase = "Pulling";
+          detail = p.repo || "";
         } else if (p.phase === "indexing") {
-          text = "Indexing " + (p.repo || "") + ": " + (p.done || 0) + "/" + (p.total || 0);
+          phase = "Indexing";
+          detail = p.repo || "";
+          done = p.done || 0;
+          total = p.total || 0;
         } else if (p.phase === "starting") {
-          text = "Starting sync...";
+          phase = "Preparing";
         }
       }
+
+      // Build fluently: "Indexing fmb-docs · 124/230 files"
+      let text = phase;
+      if (detail) text += " " + detail;
+      if (total > 0) text += " \u00b7 " + done + "/" + total + " files";
       el.textContent = text;
-      el.className = "text-muted";
+      el.className = "";
+
+      // Show progress bar panel
+      this._showProgressPanel(phase, detail, done, total);
 
       // Keep button in syncing state
       if (this._syncBtn) {
@@ -725,7 +751,9 @@ registerPlugin({
         this._syncBtn.textContent = "Syncing...";
       }
     } else {
-      // Sync complete
+      // Sync complete — hide progress panel
+      this._hideProgressPanel();
+
       if (this._pollInterval) {
         clearInterval(this._pollInterval);
         this._pollInterval = null;
@@ -739,10 +767,11 @@ registerPlugin({
       if (status.last_sync) {
         const d = new Date(status.last_sync);
         el.textContent = "Last sync: " + d.toLocaleString();
+        el.className = "text-muted";
       } else {
         el.textContent = "Not synced yet";
+        el.className = "text-muted";
       }
-      el.className = "text-muted";
 
       // Toast on completion (only if we were previously syncing)
       if (this._wasSyncing) {
@@ -750,6 +779,53 @@ registerPlugin({
       }
     }
     this._wasSyncing = status.in_progress;
+  },
+
+  _showProgressPanel(phase, repo, done, total) {
+    const panel = this._progressPanel;
+    if (!panel) return;
+    panel.style.display = "block";
+    panel.innerHTML = "";
+
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    // Phase line: "Indexing fmb-docs"
+    const phaseLine = h("div", {
+      style: { fontSize: "13px", fontWeight: "600", marginBottom: "6px", color: "var(--text-primary)" },
+    }, phase + (repo ? " " + repo : ""));
+
+    // Progress bar
+    const barOuter = h("div", {
+      style: { height: "8px", borderRadius: "4px", background: "var(--bg-primary)", overflow: "hidden", marginBottom: "6px" },
+    });
+    const barInner = h("div", {
+      style: {
+        height: "100%", width: pct + "%", borderRadius: "4px",
+        background: "var(--accent, #3B82F6)",
+        transition: "width 0.4s ease",
+      },
+    });
+    barOuter.appendChild(barInner);
+
+    // Count line: "124 / 230 files"
+    const countLine = h("div", {
+      style: { fontSize: "12px", color: "var(--text-muted)" },
+    });
+    if (total > 0) {
+      countLine.textContent = done + " / " + total + " files" + (pct > 0 ? " \u00b7 " + pct + "%" : "");
+    } else {
+      countLine.textContent = "\u2026";
+    }
+
+    panel.appendChild(phaseLine);
+    panel.appendChild(barOuter);
+    panel.appendChild(countLine);
+  },
+
+  _hideProgressPanel() {
+    if (this._progressPanel) {
+      this._progressPanel.style.display = "none";
+    }
   },
 
   async _loadSyncStatus() {
