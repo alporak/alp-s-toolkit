@@ -114,7 +114,11 @@ Plans:
   4. File-type filter chips toggle visibility by format; keyboard navigation (Arrow keys/Enter/Escape) works for result focus, preview expansion, and search clearing
   5. Empty/error states display appropriate messages ("No results found for '{query}'", "Index building...", "0 repos configured"), error toasts appear on sync/search failures, and browser console shows zero errors
 
-**Plans**: TBD
+**Plans**: 1 plan in 1 wave
+
+Plans:
+- [ ] [07-01-PLAN.md](.planning/phases/07-frontend-spa/07-01-PLAN.md) — Search SPA plugin: debounced search, result rendering, preview accordion, file-type filters, keyboard navigation, sync controls, empty/error states
+
 **UI hint**: yes
 
 ---
@@ -129,7 +133,7 @@ Plans:
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
 | 5. Extraction & Index Foundation | 2/2 | Complete | 2026-07-01 |
 | 6. Sync Engine & Search API | 2/2 | Complete   | 2026-07-01 |
-| 7. Frontend SPA | 0/1 | Not started | -
+| 7. Frontend SPA | 0/1 | Planned | 2026-07-01
 
 ---
 
