@@ -1158,3 +1158,191 @@ class TestXssSanitization:
             # The text content "Useful documentation about security" should survive
             assert "useful" in snippet.lower()
             assert "security" in snippet.lower()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Task 4 Tests (Plan 06-02) — Sync trigger, status, startup
+# ═══════════════════════════════════════════════════════════════
+
+class TestSyncTriggerEndpoint:
+    """Integration tests for POST /api/doc_search/sync."""
+
+    def test_sync_trigger_starts_background_job(self, search_client):
+        """POST /sync returns sync_started and fires _sync_job."""
+        from app.plugins.doc_search import _sync_job as real_sync_job
+
+        call_tracker = []
+
+        async def _mock_sync_job():
+            call_tracker.append(True)
+
+        with patch("app.plugins.doc_search._sync_job", side_effect=_mock_sync_job):
+            response = search_client.post("/api/doc_search/sync")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "sync_started"
+            # The mocked _sync_job should have been called
+            # (may need short wait for async task to fire)
+            import time
+            time.sleep(0.2)
+            assert len(call_tracker) >= 1, "_sync_job was not called"
+
+    def test_sync_already_running_returns_conflict(self, search_client):
+        """POST /sync when lock held returns sync_already_running."""
+        from app.plugins.doc_search import _sync_lock
+
+        # Acquire lock first (simulate sync in progress)
+        async def _acquire_and_test():
+            await _sync_lock.acquire()
+            # Now POST should detect lock is held
+
+        asyncio.run(_acquire_and_test())
+
+        try:
+            response = search_client.post("/api/doc_search/sync")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "sync_already_running"
+        finally:
+            # Release lock
+            async def _release():
+                _sync_lock.release()
+            asyncio.run(_release())
+
+
+class TestSyncStatusEndpoint:
+    """Integration tests for GET /api/doc_search/sync/status."""
+
+    def test_status_returns_correct_shape(self, search_client):
+        """GET /sync/status returns {in_progress, progress, last_sync}."""
+        response = search_client.get("/api/doc_search/sync/status")
+        assert response.status_code == 200
+        data = response.json()
+        assert "in_progress" in data
+        assert "progress" in data
+        assert "last_sync" in data
+        assert isinstance(data["in_progress"], bool)
+        # last_sync was seeded in _make_integration_db
+        assert data["last_sync"] is not None
+
+    def test_status_progress_null_when_no_sync_run(self, integration_db):
+        """progress is null when no sync has run yet."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.plugins.doc_search import DocSearchPlugin
+
+        # Create fresh DB without sync_progress state
+        conn = sqlite3.connect(integration_db)
+        conn.execute("DELETE FROM sync_state WHERE key = 'last_sync'")
+        conn.commit()
+        conn.close()
+
+        app = FastAPI()
+        plugin = DocSearchPlugin()
+        plugin.register_routes(app)
+        client = TestClient(app)
+
+        with patch("app.plugins.doc_search.DB_PATH", integration_db):
+            response = client.get("/api/doc_search/sync/status")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["in_progress"] is False
+            assert data["progress"] is None
+            assert data["last_sync"] is None
+
+    def test_status_reflects_ongoing_sync(self, search_client):
+        """When sync is in progress, in_progress is true and progress has values."""
+        from app.plugins.doc_search import _sync_lock, _db_upsert_state
+
+        # Simulate ongoing sync by seeding progress and holding the lock
+        _db_upsert_state("sync_progress", {
+            "phase": "indexing", "repo": "TestRepo", "done": 5, "total": 10,
+        })
+
+        # Acquire lock to simulate in-progress state
+        async def _acquire():
+            await _sync_lock.acquire()
+        asyncio.run(_acquire())
+
+        try:
+            # Re-create client with the updated DB
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+            from app.plugins.doc_search import DocSearchPlugin
+
+            app = FastAPI()
+            plugin = DocSearchPlugin()
+            plugin.register_routes(app)
+            client2 = TestClient(app)
+
+            with patch("app.plugins.doc_search.DB_PATH", integration_db), \
+                 patch("app.plugins.doc_search._sync_lock", _sync_lock):
+                response = client2.get("/api/doc_search/sync/status")
+                assert response.status_code == 200
+                data = response.json()
+                assert data["in_progress"] is True
+                assert data["progress"] is not None
+                assert data["progress"]["phase"] == "indexing"
+                assert data["progress"]["done"] == 5
+                assert data["progress"]["total"] == 10
+        finally:
+            async def _release():
+                _sync_lock.release()
+            asyncio.run(_release())
+
+
+class TestStartupBackgroundSync:
+    """Test that startup() fires initial sync in background."""
+
+    def test_startup_fires_background_sync(self):
+        """startup() calls asyncio.create_task(_sync_job()) without blocking."""
+        from unittest.mock import MagicMock, patch
+        from app.plugins.doc_search import DocSearchPlugin
+
+        # We need a running event loop for create_task
+        async def _run_test():
+            plugin = DocSearchPlugin()
+
+            # Track whether _sync_job is called
+            call_flag = []
+
+            async def _mock_sync_job():
+                call_flag.append(True)
+
+            # We can't easily test startup() because it uses module-level DB_PATH.
+            # Instead, verify that the startup method exists and has the
+            # create_task pattern by checking the source.
+            with patch("app.plugins.doc_search._sync_job", side_effect=_mock_sync_job), \
+                 patch("app.plugins.doc_search._get_db"):
+                # startup() is sync — call it directly
+                plugin.startup()
+                # Give the task a moment to start
+                await asyncio.sleep(0.1)
+                # _sync_job should have been scheduled via create_task
+                assert len(call_flag) >= 1, "startup() did not fire _sync_job"
+
+        asyncio.run(_run_test())
+
+    def test_startup_does_not_block(self):
+        """startup() returns immediately — does not wait for sync to complete."""
+        import time
+        from unittest.mock import patch
+        from app.plugins.doc_search import DocSearchPlugin
+
+        async def _run_test():
+            plugin = DocSearchPlugin()
+
+            async def _slow_sync_job():
+                # Simulate a long sync
+                await asyncio.sleep(5)
+                return None
+
+            with patch("app.plugins.doc_search._sync_job", side_effect=_slow_sync_job), \
+                 patch("app.plugins.doc_search._get_db"):
+                t0 = time.time()
+                plugin.startup()  # must return immediately
+                t1 = time.time()
+                elapsed = t1 - t0
+                assert elapsed < 0.5, f"startup() blocked for {elapsed:.2f}s — should return immediately"
+
+        asyncio.run(_run_test())
