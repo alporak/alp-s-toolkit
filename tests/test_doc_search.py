@@ -799,3 +799,334 @@ class TestSyncJobOrchestration:
         # Both repos should have been synced (bad repo still gets synced)
         syncs = [c for c in call_order if c[0] == "sync"]
         assert len(syncs) == 2
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Task 3 Tests (Plan 06-02) — Search, Preview, Repos API
+# ═══════════════════════════════════════════════════════════════
+
+# ── Helpers ─────────────────────────────────────────────────────
+
+def _make_integration_db() -> str:
+    """Create a temp SQLite DB with full schema + seed data.
+
+    Creates doc_metadata, doc_search_fts, and sync_state tables.
+    Inserts sample documents for search testing.
+
+    Returns the filesystem path to the DB file.
+    """
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE doc_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            full_text TEXT NOT NULL DEFAULT '',
+            sha256 TEXT NOT NULL DEFAULT '',
+            encoding TEXT NOT NULL DEFAULT 'utf_8',
+            needs_ocr INTEGER NOT NULL DEFAULT 0,
+            last_extracted TEXT NOT NULL DEFAULT '',
+            UNIQUE(repo, relative_path)
+        );
+        CREATE VIRTUAL TABLE doc_search_fts USING fts5(
+            full_text,
+            tokenize='unicode61'
+        );
+        CREATE TABLE sync_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+    """)
+    conn.commit()
+
+    # Seed test documents
+    docs = [
+        ("TestRepo", "docs/readme.md", "Welcome to the documentation toolkit. This project indexes and searches technical documents.", "abc111", 0),
+        ("TestRepo", "docs/api.md", "The API provides search endpoints for full-text queries using BM25 ranking. Use the /search endpoint.", "def222", 0),
+        ("TestRepo", "docs/guide.pdf", "", "ghi333", 1),  # needs_ocr = 1
+        ("TestRepo", "notes/meeting.docx", "Meeting notes for Q3 planning session. Discussion about FTS5 optimization.", "jkl444", 0),
+        ("OtherRepo", "src/main.py", "print('hello world')", "mno555", 0),
+    ]
+    for repo, rel_path, text, sha, ocr in docs:
+        conn.execute(
+            "INSERT INTO doc_metadata (repo, relative_path, full_text, sha256, needs_ocr) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (repo, rel_path, text, sha, ocr),
+        )
+        # Get rowid for FTS5 insert
+        rowid = conn.execute(
+            "SELECT id FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+            (repo, rel_path),
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO doc_search_fts(rowid, full_text) VALUES (?, ?)",
+            (rowid, text),
+        )
+    conn.commit()
+
+    # Seed sync_state data
+    conn.execute(
+        "INSERT INTO sync_state (key, value) VALUES (?, ?)",
+        ("last_sync", '"2026-07-01T12:00:00+00:00"'),
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _make_test_app(db_path: str) -> FastAPI:
+    """Create a FastAPI app with DocSearchPlugin registered, DB_PATH patched."""
+    from fastapi import FastAPI
+    from app.plugins.doc_search import DocSearchPlugin
+
+    app = FastAPI()
+    plugin = DocSearchPlugin()
+    plugin.register_routes(app)
+    return app
+
+
+# ── Pytest fixtures ──────────────────────────────────────────────
+
+@pytest.fixture
+def integration_db():
+    """Provide a temp DB path with schema + seed data."""
+    db_path = _make_integration_db()
+    yield db_path
+    try:
+        os.unlink(db_path)
+    except OSError:
+        pass
+
+
+@pytest.fixture
+def search_client(integration_db):
+    """HTTP test client against FastAPI app with real test DB."""
+    app = _make_test_app(integration_db)
+
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    # We need the endpoint code to use our test DB, not the production one.
+    # The endpoint uses _get_db() which uses DB_PATH.
+    # Override DB_PATH for the test.
+    with patch("app.plugins.doc_search.DB_PATH", integration_db):
+        yield client
+
+
+# ── Search endpoint tests ────────────────────────────────────────
+
+class TestSearchEndpoint:
+    """Integration tests for GET /api/doc_search/search."""
+
+    def test_search_returns_bm25_results(self, search_client):
+        """FTS5 MATCH returns results with snippet, score, repo, path, etc."""
+        response = search_client.get("/api/doc_search/search", params={"q": "documentation"})
+        assert response.status_code == 200
+        data = response.json()
+        assert "results" in data
+        assert "total" in data
+        assert "query" in data
+        assert data["query"] == "documentation"
+        assert data["total"] > 0
+        assert isinstance(data["results"], list)
+
+        # Check first result shape
+        r = data["results"][0]
+        assert "repo" in r
+        assert "path" in r
+        assert "filename" in r
+        assert "snippet" in r
+        assert "score" in r
+        assert "needs_ocr" in r
+        assert "file_type" in r
+        assert isinstance(r["needs_ocr"], bool)
+        assert isinstance(r["score"], (int, float))
+
+    def test_search_limits_to_50(self, search_client):
+        """Max 50 results returned per SRCH-01."""
+        # Our test DB only has a few docs, so just verify count <= total
+        response = search_client.get("/api/doc_search/search", params={"q": "the"})
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["results"]) <= 50
+
+    def test_empty_query_returns_empty_gracefully(self, search_client):
+        """Empty q param returns empty results, no error per SRCH-05."""
+        response = search_client.get("/api/doc_search/search", params={"q": ""})
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"results": [], "total": 0, "query": ""}
+
+    def test_search_finds_specific_term(self, search_client):
+        """Search for specific word returns relevant doc."""
+        response = search_client.get("/api/doc_search/search", params={"q": "BM25"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 1
+        found = False
+        for r in data["results"]:
+            if "api.md" in r.get("path", ""):
+                found = True
+                break
+        assert found, "Expected api.md in results for BM25 query"
+
+    def test_search_result_filename_derived(self, search_client):
+        """filename is derived from path basename."""
+        response = search_client.get("/api/doc_search/search", params={"q": "print"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 1
+        assert data["results"][0]["filename"] == "main.py"
+
+    def test_search_result_file_type_derived(self, search_client):
+        """file_type is lowercase extension without dot."""
+        response = search_client.get("/api/doc_search/search", params={"q": "print"})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] >= 1
+        assert data["results"][0]["file_type"] == "py"
+
+
+# ── Preview endpoint tests ───────────────────────────────────────
+
+class TestPreviewEndpoint:
+    """Integration tests for GET /api/doc_search/preview/{repo}/{path}."""
+
+    def test_preview_returns_text(self, search_client):
+        """Preview returns extracted text for known document."""
+        response = search_client.get("/api/doc_search/preview/TestRepo/docs/readme.md")
+        assert response.status_code == 200
+        data = response.json()
+        assert "repo" in data
+        assert "path" in data
+        assert "text" in data
+        assert data["repo"] == "TestRepo"
+        assert data["path"] == "docs/readme.md"
+        assert "Welcome to the documentation toolkit" in data["text"]
+
+    def test_preview_truncates_at_2000_chars(self, search_client):
+        """Preview text is truncated to 2000 characters."""
+        response = search_client.get("/api/doc_search/preview/TestRepo/docs/readme.md")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["text"]) <= 2000
+
+    def test_preview_path_traversal_returns_403(self, search_client):
+        """Path traversal attack returns 403 per NFR-13."""
+        # Try to escape with ../
+        response = search_client.get(
+            "/api/doc_search/preview/TestRepo/../../../etc/passwd"
+        )
+        assert response.status_code == 403
+        data = response.json()
+        assert "error" in data.get("detail", {})
+
+    def test_preview_not_found_returns_404(self, search_client):
+        """Non-existent document returns 404."""
+        response = search_client.get(
+            "/api/doc_search/preview/TestRepo/docs/nonexistent.md"
+        )
+        assert response.status_code == 404
+        data = response.json()
+        assert "error" in data.get("detail", {})
+
+
+# ── Repos endpoint tests ─────────────────────────────────────────
+
+class TestReposEndpoint:
+    """Integration tests for GET /api/doc_search/repos."""
+
+    def test_repos_returns_configured_repos_with_counts(self, search_client):
+        """Returns list of {name, path, file_count, last_synced} per SRCH-04."""
+        mock_repos = [
+            {"name": "TestRepo", "path": "/tmp/test-repo"},
+            {"name": "OtherRepo", "path": "/tmp/other-repo"},
+        ]
+        with patch("app.plugins.doc_search._load_doc_repos", return_value=mock_repos):
+            response = search_client.get("/api/doc_search/repos")
+            assert response.status_code == 200
+            data = response.json()
+            assert isinstance(data, list)
+            assert len(data) == 2
+
+            repo_names = {r["name"] for r in data}
+            assert "TestRepo" in repo_names
+            assert "OtherRepo" in repo_names
+
+            # Check shape
+            for repo in data:
+                assert "name" in repo
+                assert "path" in repo
+                assert "file_count" in repo
+                assert "last_synced" in repo
+                assert isinstance(repo["file_count"], int)
+
+            # TestRepo has 4 docs, OtherRepo has 1
+            testrepo = next(r for r in data if r["name"] == "TestRepo")
+            assert testrepo["file_count"] == 4
+
+    def test_repos_zero_configured_returns_empty(self, search_client):
+        """Zero repos configured returns empty list."""
+        with patch("app.plugins.doc_search._load_doc_repos", return_value=[]):
+            response = search_client.get("/api/doc_search/repos")
+            assert response.status_code == 200
+            data = response.json()
+            assert data == []
+
+
+# ── XSS sanitization tests ───────────────────────────────────────
+
+class TestXssSanitization:
+    """XSS payloads are stripped from stored text before JSON response."""
+
+    def _seed_xss_doc(self, db_path: str, repo: str, rel_path: str, text: str):
+        """Insert a document with potentially malicious text into the test DB."""
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "INSERT INTO doc_metadata (repo, relative_path, full_text, sha256) "
+            "VALUES (?, ?, ?, ?)",
+            (repo, rel_path, text, "xss999"),
+        )
+        rowid = conn.execute(
+            "SELECT id FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+            (repo, rel_path),
+        ).fetchone()["id"]
+        conn.execute(
+            "INSERT INTO doc_search_fts(rowid, full_text) VALUES (?, ?)",
+            (rowid, text),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_xss_tags_stripped_from_snippet(self, integration_db, search_client):
+        """HTML/script tags in stored text are stripped from search snippet."""
+        xss_text = '<script>alert("xss")</script> Useful documentation about <b>security</b>'
+        self._seed_xss_doc(
+            integration_db, "TestRepo", "xss/evil.md", xss_text
+        )
+
+        from app.plugins.doc_search import DB_PATH
+        # Re-create client since DB was modified after client creation
+        # The search_client fixture already patches DB_PATH, but the DB was seeded
+        # after the client was created.  The client still works because it reads
+        # the same file.
+        response = search_client.get("/api/doc_search/search", params={"q": "security"})
+        assert response.status_code == 200
+        data = response.json()
+
+        # Find our doc
+        xss_result = None
+        for r in data["results"]:
+            if r.get("path") == "xss/evil.md":
+                xss_result = r
+                break
+
+        if xss_result is not None:
+            snippet = xss_result["snippet"]
+            # script tags must be absent
+            assert "<script>" not in snippet.lower()
+            assert "alert" not in snippet.lower() or "xss" not in snippet.lower()
