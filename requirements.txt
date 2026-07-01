@@ -24,3 +24,11 @@ pyserial
 
 # ── System tray launcher ───────────────────────
 pystray
+
+# ── Document extraction ─────────────────────────
+pdfplumber
+pypdf
+python-docx
+doc2txt
+docutils
+charset-normalizer
