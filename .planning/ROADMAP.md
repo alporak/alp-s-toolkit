@@ -29,7 +29,7 @@ This roadmap spans three milestones:
 
 ## Phases
 
-- [ ] **Phase 5: Extraction & Index Foundation** — Text extraction pipeline for 6 formats + FTS5 index schema with content-less tables
+- [x] **Phase 5: Extraction & Index Foundation** — Text extraction pipeline for 6 formats + FTS5 index schema with content-less tables
 - [ ] **Phase 6: Sync Engine & Search API** — Git sync with incremental updates + FTS5 search API with BM25 ranking
 - [ ] **Phase 7: Frontend SPA** — Search UI with debounced search-as-you-type, inline preview, file-type filters, keyboard navigation
 
@@ -68,7 +68,7 @@ Strictly sequential. Phase 6 depends on the FTS5 schema and extraction pipeline 
 
 Plans:
 - [x] [05-01-PLAN.md](.planning/phases/05-extraction-index-foundation/05-01-PLAN.md) — Text Extraction Pipeline: 6 format extractors + charset detection + SHA-256 hashing (EXTR-01..05)
-- [ ] [05-02-PLAN.md](.planning/phases/05-extraction-index-foundation/05-02-PLAN.md) — FTS5 Index Schema & Plugin Foundation: content-less FTS5 + doc_metadata + auto-migration + unit tests (INDEX-01..05)
+- [x] [05-02-PLAN.md](.planning/phases/05-extraction-index-foundation/05-02-PLAN.md) — FTS5 Index Schema & Plugin Foundation: content-less FTS5 + doc_metadata + auto-migration + unit tests (INDEX-01..05)
 
 ---
 
@@ -123,10 +123,10 @@ Plans:
 | 2. Frontend Dashboard | 1/1 | Complete | M1 |
 | 3. Backend Enhancements | 1/1 | Complete | M2 |
 | 4. Frontend Power-Dashboard | 1/1 | Complete | M2 |
-| 5. Extraction & Index Foundation | 2/2 | Planning complete | - |
+| 5. Extraction & Index Foundation | 2/2 | Complete | 2026-07-01 |
 | 6. Sync Engine & Search API | 0/1 | Not started | - |
 | 7. Frontend SPA | 0/1 | Not started | -
 
 ---
 
-*Last updated: 2026-07-01 | M3 Roadmap Created*
+*Last updated: 2026-07-01 | Phase 5 Complete — ready for Phase 6 (Sync Engine & Search API)*

@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: M3
 milestone_name: Documentation Search Engine
-status: Phase 5 Plan 01 executed — extraction pipeline complete
-last_updated: "2026-07-01T14:20:00.000Z"
-last_activity: 2026-07-01 — Plan 05-01 executed (doc_extraction.py + dependencies)
+status: Phase 5 complete — extraction pipeline + FTS5 schema foundation done
+last_updated: "2026-07-01T09:14:26Z"
+last_activity: 2026-07-01 — Plan 05-02 executed (DocSearchPlugin + unit tests)
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 6
-  completed_plans: 1
-  percent: 16
+  completed_plans: 2
+  percent: 33
 ---
 
 # Project State
@@ -58,17 +58,18 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `app/plugins/doc_search.py` | ~400 | Backend: plugin lifecycle, sync orchestration, search API |
-| `app/plugins/doc_extraction.py` | ~150 | Text extraction: format dispatch for 6 file types |
+| `app/plugins/doc_search.py` | 179 | Plugin lifecycle, FTS5 schema, status endpoint (Phase 6 adds sync/search) |
+| `app/plugins/doc_extraction.py` | 391 | Text extraction: format dispatch for 6 file types (complete) |
+| `tests/test_doc_extraction.py` | 280 | Unit tests: 26 functions covering all extractors, dispatch, failure modes |
 | `app/static/js/doc_search.js` | ~300 | Frontend: search SPA with debounce, filters, keyboard nav |
 | `app/static/js/app.js` | +1 | `import "./doc_search.js"` |
 
 ## Current Position
 
 **Phase:** 5 — Extraction & Index Foundation
-**Plan:** 01 of 2 — COMPLETE
-**Status:** Plan 01 executed (extraction pipeline). Plan 02 pending (FTS5 schema + tests).
-**Last activity:** 2026-07-01 — `app/plugins/doc_extraction.py` created, 6 extraction deps installed
+**Plan:** 02 of 2 — COMPLETE
+**Status:** Phase 5 complete. Plan 02 executed (DocSearchPlugin + FTS5 schema + unit tests).
+**Last activity:** 2026-07-01 — `app/plugins/doc_search.py` created, `tests/test_doc_extraction.py` created (25/26 tests pass)
 
 ## Accumulated Context
 
@@ -92,16 +93,16 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 
 - [x] ~~Phase 5: Plan extraction pipeline + FTS5 schema~~
 - [x] Phase 5 Plan 01: Extraction pipeline complete
-- [ ] Phase 5 Plan 02: FTS5 schema & plugin foundation
+- [x] Phase 5 Plan 02: FTS5 schema & plugin foundation complete
 - [ ] Phase 6: Plan sync engine + search API
 - [ ] Phase 7: Plan frontend SPA
 
 ## Session Continuity
 
-- **Last session:** 2026-07-01 — Plan 05-01 execution complete
-- **Next action:** `/gsd-execute-phase --plan 05-02`
-- **Context needed:** Read 05-01-SUMMARY.md, 05-02-PLAN.md, app/plugins/doc_extraction.py
+- **Last session:** 2026-07-01 — Plan 05-02 execution complete (Phase 5 done)
+- **Next action:** `/gsd-execute-phase --plan 06-*` (Phase 6: Sync Engine + Search API)
+- **Context needed:** Read 05-02-SUMMARY.md, app/plugins/doc_search.py, app/plugins/doc_extraction.py
 
 ---
 
-*Last updated: 2026-07-01 | M3 Roadmap Created*
+*Last updated: 2026-07-01 | Phase 5 Complete — FTS5 schema + extraction pipeline ready for Phase 6*

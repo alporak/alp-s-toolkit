@@ -16,11 +16,11 @@
 
 ## INDEX: Search Index
 
-- [ ] **INDEX-01**: SQLite FTS5 virtual table (`doc_search_fts`) using content-less mode (`content='doc_metadata'`, `content_rowid='id'`) — stores inverted index only, not full text
-- [ ] **INDEX-02**: `doc_metadata` table stores: repo name, relative path, full extracted text, SHA-256 file hash, detected encoding, `needs_ocr` flag, last_extracted timestamp
-- [ ] **INDEX-03**: File hash fingerprinting enables incremental updates — only re-extract files whose SHA-256 has changed
-- [ ] **INDEX-04**: Index persisted to disk (`doc_search.db` in `app/plugins/`), WAL mode — not `:memory:`
-- [ ] **INDEX-05**: Schema versioning with auto-migration on plugin startup (pattern from competence plugin)
+- [x] **INDEX-01**: SQLite FTS5 virtual table (`doc_search_fts`) using content-less mode (`content='doc_metadata'`, `content_rowid='id'`) — stores inverted index only, not full text
+- [x] **INDEX-02**: `doc_metadata` table stores: repo name, relative path, full extracted text, SHA-256 file hash, detected encoding, `needs_ocr` flag, last_extracted timestamp
+- [x] **INDEX-03**: File hash fingerprinting enables incremental updates — only re-extract files whose SHA-256 has changed
+- [x] **INDEX-04**: Index persisted to disk (`doc_search.db` in `app/plugins/`), WAL mode — not `:memory:`
+- [x] **INDEX-05**: Schema versioning with auto-migration on plugin startup (pattern from competence plugin)
 
 ---
 
