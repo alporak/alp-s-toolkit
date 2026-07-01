@@ -24,6 +24,8 @@ DEFAULTS: dict[str, Any] = {
     "server_tls_key_path": "",
     "server_tls_ca_path": "",
     "server_tls_verify_client": False,
+    "server_https_response_enabled": False,
+    "server_https_response_body": '{"status":"ok","server":"alps-toolkit"}',
     "avl_ids_path": "",
     "catcher_path": os.path.join(ROOT_DIR, "third_party", "easy-catcher", "catcher_mod", "Catcher.exe"),
     "clg2txt_path": os.path.join(ROOT_DIR, "third_party", "easy-catcher", "catcher_mod", "Clg2Txt.exe"),
@@ -32,6 +34,7 @@ DEFAULTS: dict[str, Any] = {
     "jira_base_url": "https://teltonika-telematics.atlassian.net",
     "universal_tester_tool_path": os.path.join(ROOT_DIR, "third_party", "universal-tester-tool"),
     "universal_tester_tool_log_dir": os.path.join(ROOT_DIR, "output", "universal_tester_tool_logs"),
+    "doc_repos": [],
 }
 
 JIRA_CFG_PATH = os.path.join(ROOT_DIR, "third_party", "jira-time-tracker", "jira_config.json")

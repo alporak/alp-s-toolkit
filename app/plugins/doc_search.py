@@ -14,13 +14,17 @@ Exports:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import sqlite3
+import subprocess
 import threading
 
 from fastapi import FastAPI
 
+from app import config
 from app.plugins.base import ToolkitPlugin
 
 logger = logging.getLogger("doc_search")
@@ -70,6 +74,129 @@ def _db_set(key: str, value: str) -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+# ═══════════════════════════════════════════════════════════
+#  Sync engine — config, git, state helpers
+# ═══════════════════════════════════════════════════════════
+
+def _load_doc_repos() -> list[dict]:
+    """Read doc_repos from toolkit_settings.json via config.load().
+
+    Each entry must have both ``name`` and ``path`` keys (both non-empty).
+    Entries missing either key are silently skipped.
+
+    Returns:
+        List of ``{name, path}`` dicts, or empty list if key is missing/empty.
+    """
+    cfg = config.load()
+    repos = cfg.get("doc_repos", [])
+    if not isinstance(repos, list):
+        logger.warning("doc_repos in config is not a list; ignoring")
+        return []
+
+    valid: list[dict] = []
+    for entry in repos:
+        name = entry.get("name", "")
+        path = entry.get("path", "")
+        if isinstance(name, str) and name.strip() and isinstance(path, str) and path.strip():
+            valid.append({"name": name.strip(), "path": path.strip()})
+        else:
+            logger.debug("Skipping invalid doc_repo entry: %s", entry)
+
+    logger.info("Loaded %d doc repos from config", len(valid))
+    return valid
+
+
+async def _git_pull(repo_path: str) -> dict:
+    """Run ``git pull`` in *repo_path* via subprocess (argument list, no shell).
+
+    Executed via :func:`asyncio.to_thread` to avoid blocking the event loop.
+    Timeout is 120 seconds.  Never raises — failures are returned as
+    ``{ok: False, stderr: ...}``.
+
+    Returns:
+        ``{ok: bool, stdout: str, stderr: str}``
+    """
+    cmd = ["git", "-C", repo_path, "pull"]
+    logger.info("git pull: %s", repo_path)
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+    try:
+        proc = await asyncio.to_thread(_run)
+        ok = proc.returncode == 0
+        if not ok:
+            logger.warning(
+                "git pull failed for %s (rc=%d): %s",
+                repo_path, proc.returncode, proc.stderr.strip(),
+            )
+        return {"ok": ok, "stdout": proc.stdout, "stderr": proc.stderr}
+    except subprocess.TimeoutExpired:
+        logger.warning("git pull timed out after 120s: %s", repo_path)
+        return {"ok": False, "stdout": "", "stderr": "Git pull timed out after 120s"}
+    except FileNotFoundError:
+        logger.warning("git executable not found on PATH; cannot pull %s", repo_path)
+        return {"ok": False, "stdout": "", "stderr": "git executable not found"}
+    except Exception as exc:
+        logger.warning("git pull error for %s: %s", repo_path, exc)
+        return {"ok": False, "stdout": "", "stderr": str(exc)}
+
+
+def _db_upsert_state(key: str, val) -> None:
+    """Store *val* as JSON under *key* in the sync_state table."""
+    encoded = json.dumps(val)
+    _db_set(key, encoded)
+
+
+def _db_get_state(key: str):
+    """Read *key* from sync_state and return the parsed JSON value.
+
+    Returns ``None`` if the key is missing or the stored value is not valid JSON.
+    """
+    raw = _db_get(key)
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("sync_state key '%s' contains invalid JSON; returning None", key)
+        return None
+
+
+# ── Sync lock (module-level) ─────────────────────────────────
+
+_sync_lock = asyncio.Lock()
+
+
+async def _sync_job() -> None:
+    """Top-level sync orchestrator (async coroutine).
+
+    Guarded by :data:`_sync_lock` — only one sync may run at a time.
+    When the lock is already held, the call is silently skipped with a warning.
+
+    This function is extended in Task 2 with the full pipeline
+    (pull → walk → hash → extract → upsert → cleanup).
+    """
+    if _sync_lock.locked():
+        logger.warning("Sync already in progress; skipping duplicate trigger")
+        return
+
+    async with _sync_lock:
+        try:
+            repos = _load_doc_repos()
+            if not repos:
+                logger.info("No doc repos configured; sync complete")
+                return
+
+            _db_upsert_state("sync_progress", {"phase": "starting"})
+            logger.info("Sync job started — %d repo(s) configured", len(repos))
+        except Exception as exc:
+            logger.error("Sync job failed: %s", exc)
+        finally:
+            # Lock released by 'async with' exiting
+            pass
 
 
 # ═══════════════════════════════════════════════════════════
