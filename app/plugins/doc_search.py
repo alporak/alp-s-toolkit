@@ -385,8 +385,9 @@ async def _sync_repo(repo_name: str, repo_path: str) -> dict:
                 finally:
                     conn.close()
 
-        # Run extractions in thread pool (max_workers=4)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        # Run extractions in thread pool (max_workers=2 to limit memory)
+        # 4 simultaneous PDF extractions can OOM on large files
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             # Submit all extraction tasks
             futures = {
                 pool.submit(_extract_one, full_path): (rel_path, full_path)
@@ -411,8 +412,14 @@ async def _sync_repo(repo_name: str, repo_path: str) -> dict:
                     logger.warning("Extraction failed for %s: %s", full_path, exc)
 
                 done_total += 1
-                # Batch progress updates — only every 25 files and through a thread
-                if done_total - last_progress_update >= 25 or done_total == len(needs_change):
+                # Log progress every 100 files so we can pinpoint OOM location
+                if done_total % 100 == 0 or done_total == len(needs_change):
+                    logger.info(
+                        "Repo '%s': indexed %d/%d files (%d errors so far)",
+                        repo_name, done_total, len(needs_change), len(errors),
+                    )
+                # Batch progress updates — only every 50 files and through a thread
+                if done_total - last_progress_update >= 50 or done_total == len(needs_change):
                     last_progress_update = done_total
                     await asyncio.to_thread(_db_upsert_state, "sync_progress", {
                         "phase": "indexing",
