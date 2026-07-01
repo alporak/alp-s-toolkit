@@ -283,3 +283,519 @@ class TestSyncJobGuard:
                 assert not _sync_lock.locked()
 
         asyncio.run(_run_release_test())
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Task 2 Tests — _should_reindex, _upsert_document, _clean_deleted,
+#                 _sync_repo, _sync_job orchestration
+# ═══════════════════════════════════════════════════════════════
+
+# ── Helpers for Task 2 tests ──────────────────────────────────
+
+def _create_doc_db() -> sqlite3.Connection:
+    """Create an in-memory SQLite DB with doc_metadata + doc_search_fts schema."""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE doc_metadata (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            full_text TEXT NOT NULL DEFAULT '',
+            sha256 TEXT NOT NULL DEFAULT '',
+            encoding TEXT NOT NULL DEFAULT 'utf_8',
+            needs_ocr INTEGER NOT NULL DEFAULT 0,
+            last_extracted TEXT NOT NULL DEFAULT '',
+            UNIQUE(repo, relative_path)
+        );
+        CREATE VIRTUAL TABLE doc_search_fts USING fts5(
+            full_text,
+            tokenize='unicode61'
+        );
+    """)
+    conn.commit()
+    return conn
+
+
+class TestShouldReindex:
+    """Test _should_reindex() hash comparison."""
+
+    def test_returns_true_when_no_row_exists(self):
+        """No matching row → reindex needed."""
+        from app.plugins.doc_search import _should_reindex
+        conn = _create_doc_db()
+        try:
+            assert _should_reindex(conn, "repo-a", "docs/readme.md", "abc123") is True
+        finally:
+            conn.close()
+
+    def test_returns_false_when_hash_matches(self):
+        """Same SHA-256 → no reindex needed."""
+        from app.plugins.doc_search import _should_reindex
+        conn = _create_doc_db()
+        try:
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, sha256) VALUES (?, ?, ?)",
+                ("repo-a", "docs/readme.md", "abc123"),
+            )
+            conn.commit()
+            assert _should_reindex(conn, "repo-a", "docs/readme.md", "abc123") is False
+        finally:
+            conn.close()
+
+    def test_returns_true_when_hash_differs(self):
+        """Different SHA-256 → reindex needed."""
+        from app.plugins.doc_search import _should_reindex
+        conn = _create_doc_db()
+        try:
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, sha256) VALUES (?, ?, ?)",
+                ("repo-a", "docs/readme.md", "abc123"),
+            )
+            conn.commit()
+            assert _should_reindex(conn, "repo-a", "docs/readme.md", "def456") is True
+        finally:
+            conn.close()
+
+
+class TestUpsertDocument:
+    """Test _upsert_document() FTS5 content-less upsert."""
+
+    def test_inserts_new_document(self):
+        """New document creates row in doc_metadata and doc_search_fts."""
+        from app.plugins.doc_search import _upsert_document
+        conn = _create_doc_db()
+        try:
+            result = {
+                "text": "Hello world from test document",
+                "encoding": "utf_8",
+                "needs_ocr": False,
+                "sha256": "abc123",
+                "error": None,
+            }
+            rowid = _upsert_document(conn, "repo-a", "docs/test.md", result)
+
+            # Verify doc_metadata row
+            meta = conn.execute(
+                "SELECT * FROM doc_metadata WHERE id = ?", (rowid,)
+            ).fetchone()
+            assert meta is not None
+            assert meta["repo"] == "repo-a"
+            assert meta["relative_path"] == "docs/test.md"
+            assert "Hello world" in meta["full_text"]
+            assert meta["sha256"] == "abc123"
+            assert meta["encoding"] == "utf_8"
+
+            # Verify FTS5 entry
+            fts = conn.execute(
+                "SELECT * FROM doc_search_fts WHERE rowid = ?", (rowid,)
+            ).fetchone()
+            assert fts is not None
+            assert "Hello world" in fts["full_text"]
+        finally:
+            conn.close()
+
+    def test_upserts_existing_document(self):
+        """ON CONFLICT updates existing row and rebuilds FTS5 entry."""
+        from app.plugins.doc_search import _upsert_document
+        conn = _create_doc_db()
+        try:
+            # First insert
+            result1 = {
+                "text": "Original text", "encoding": "utf_8",
+                "needs_ocr": False, "sha256": "aaa", "error": None,
+            }
+            rowid1 = _upsert_document(conn, "repo-a", "docs/readme.md", result1)
+
+            # Second insert — same repo+path, different content
+            result2 = {
+                "text": "Updated text content", "encoding": "utf_8",
+                "needs_ocr": False, "sha256": "bbb", "error": None,
+            }
+            rowid2 = _upsert_document(conn, "repo-a", "docs/readme.md", result2)
+
+            # Rowid should be the same (updated, not new)
+            assert rowid1 == rowid2
+
+            # doc_metadata should have updated content
+            meta = conn.execute(
+                "SELECT sha256, full_text FROM doc_metadata WHERE id = ?", (rowid2,)
+            ).fetchone()
+            assert meta["sha256"] == "bbb"
+            assert "Updated text content" in meta["full_text"]
+
+            # Only one row should exist
+            count = conn.execute(
+                "SELECT COUNT(*) FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+                ("repo-a", "docs/readme.md"),
+            ).fetchone()[0]
+            assert count == 1
+
+            # FTS5 should reflect updated text, not old text
+            fts = conn.execute(
+                "SELECT full_text FROM doc_search_fts WHERE rowid = ?", (rowid2,)
+            ).fetchone()
+            assert "Updated text content" in fts["full_text"]
+            assert "Original text" not in fts["full_text"]
+        finally:
+            conn.close()
+
+
+class TestCleanDeleted:
+    """Test _clean_deleted() removes stale entries."""
+
+    def test_removes_missing_paths(self):
+        """Paths not in existing_paths set are deleted from doc_metadata."""
+        from app.plugins.doc_search import _clean_deleted
+        conn = _create_doc_db()
+        try:
+            # Insert 3 files for repo-a
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, full_text) "
+                "VALUES (?, ?, ?)",
+                ("repo-a", "keep.md", "keep text"),
+            )
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, full_text) "
+                "VALUES (?, ?, ?)",
+                ("repo-a", "delete.md", "delete text"),
+            )
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, full_text) "
+                "VALUES (?, ?, ?)",
+                ("repo-b", "other.md", "other text"),
+            )
+            conn.commit()
+
+            # Only keep.md exists on disk — delete delete.md
+            existing = {"keep.md", "new_file.md"}
+            deleted = _clean_deleted(conn, "repo-a", existing)
+
+            assert deleted == 1  # delete.md removed
+
+            # Verify keep.md still exists
+            keep = conn.execute(
+                "SELECT relative_path FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+                ("repo-a", "keep.md"),
+            ).fetchone()
+            assert keep is not None
+
+            # Verify delete.md is gone
+            gone = conn.execute(
+                "SELECT relative_path FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+                ("repo-a", "delete.md"),
+            ).fetchone()
+            assert gone is None
+
+            # repo-b should be unaffected
+            other = conn.execute(
+                "SELECT relative_path FROM doc_metadata WHERE repo = ?",
+                ("repo-b",),
+            ).fetchone()
+            assert other is not None
+        finally:
+            conn.close()
+
+    def test_returns_zero_when_nothing_deleted(self):
+        """All paths exist → zero deletions."""
+        from app.plugins.doc_search import _clean_deleted
+        conn = _create_doc_db()
+        try:
+            conn.execute(
+                "INSERT INTO doc_metadata (repo, relative_path, full_text) "
+                "VALUES (?, ?, ?)",
+                ("repo-a", "a.md", "text"),
+            )
+            conn.commit()
+
+            existing = {"a.md", "b.md"}
+            deleted = _clean_deleted(conn, "repo-a", existing)
+            assert deleted == 0
+        finally:
+            conn.close()
+
+
+class TestSyncRepo:
+    """Test _sync_repo() per-repo orchestration."""
+
+    def test_sync_repo_walks_and_extracts_changed_files(self, tmp_path):
+        """_sync_repo walks directory, extracts only changed files, upserts, cleans."""
+        from app.plugins.doc_search import _sync_repo
+        from unittest.mock import patch
+
+        repo_path = str(tmp_path / "test-repo")
+        os.makedirs(repo_path)
+        os.makedirs(os.path.join(repo_path, ".git"))
+
+        # Create some doc files
+        files = {
+            "readme.md": "# Hello World",
+            "guide.rst": "Welcome to the guide",
+            "diagram.drawio": '<mxCell value="Box 1"/>',
+        }
+        for rel, content in files.items():
+            full = os.path.join(repo_path, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write(content)
+
+        # Mock extract_text to return predictable results
+        def _mock_extract(file_path):
+            fname = os.path.basename(file_path)
+            return {
+                "text": f"EXTRACTED:{fname}",
+                "encoding": "utf_8",
+                "needs_ocr": False,
+                "sha256": f"sha-{fname}",
+                "error": None,
+            }
+
+        # _get_db factory: creates a fresh in-memory DB for each call (thread-safe)
+        def _make_in_memory_db():
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript("""
+                CREATE TABLE doc_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    full_text TEXT NOT NULL DEFAULT '',
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    encoding TEXT NOT NULL DEFAULT 'utf_8',
+                    needs_ocr INTEGER NOT NULL DEFAULT 0,
+                    last_extracted TEXT NOT NULL DEFAULT '',
+                    UNIQUE(repo, relative_path)
+                );
+                CREATE VIRTUAL TABLE doc_search_fts USING fts5(
+                    full_text,
+                    tokenize='unicode61'
+                );
+                CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
+            """)
+            conn.commit()
+            return conn
+
+        with patch(
+            "app.plugins.doc_search.extract_text", side_effect=_mock_extract
+        ), patch(
+            "app.plugins.doc_search.compute_sha256",
+            side_effect=lambda p: f"sha-{os.path.basename(p)}",
+        ), patch(
+            "app.plugins.doc_search._get_db", side_effect=_make_in_memory_db
+        ):
+            summary = asyncio.run(_sync_repo("test-repo", repo_path))
+
+            assert summary["repo"] == "test-repo"
+            assert summary["total"] == 3
+            assert summary["changed"] == 3
+            assert summary["deleted"] == 0
+            assert isinstance(summary["errors"], list)
+
+    def test_sync_repo_skips_git_directory(self, tmp_path):
+        """.git directory is skipped during walk."""
+        from app.plugins.doc_search import _sync_repo
+        from unittest.mock import patch
+
+        repo_path = str(tmp_path / "test-repo")
+        os.makedirs(repo_path)
+        os.makedirs(os.path.join(repo_path, ".git"))
+        # Create a file inside .git (should be skipped)
+        os.makedirs(os.path.join(repo_path, ".git", "objects"))
+        with open(os.path.join(repo_path, ".git", "HEAD"), "w") as f:
+            f.write("ref: refs/heads/main\n")
+
+        # Only a README outside .git
+        with open(os.path.join(repo_path, "readme.md"), "w") as f:
+            f.write("hello")
+
+        def _mock_extract(file_path):
+            return {
+                "text": "EXTRACTED",
+                "encoding": "utf_8",
+                "needs_ocr": False,
+                "sha256": f"sha-{os.path.basename(file_path)}",
+                "error": None,
+            }
+
+        def _make_in_memory_db():
+            conn = sqlite3.connect(":memory:")
+            conn.row_factory = sqlite3.Row
+            conn.executescript("""
+                CREATE TABLE doc_metadata (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    full_text TEXT NOT NULL DEFAULT '',
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    encoding TEXT NOT NULL DEFAULT 'utf_8',
+                    needs_ocr INTEGER NOT NULL DEFAULT 0,
+                    last_extracted TEXT NOT NULL DEFAULT '',
+                    UNIQUE(repo, relative_path)
+                );
+                CREATE VIRTUAL TABLE doc_search_fts USING fts5(
+                    full_text,
+                    tokenize='unicode61'
+                );
+                CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT);
+            """)
+            conn.commit()
+            return conn
+
+        with patch(
+            "app.plugins.doc_search.extract_text", side_effect=_mock_extract
+        ), patch(
+            "app.plugins.doc_search.compute_sha256",
+            side_effect=lambda p: f"sha-{os.path.basename(p)}",
+        ), patch(
+            "app.plugins.doc_search._get_db", side_effect=_make_in_memory_db
+        ):
+            summary = asyncio.run(_sync_repo("test-repo", repo_path))
+            # Only readme.md should be counted, not .git/HEAD
+            assert summary["total"] == 1
+
+
+class TestSyncJobOrchestration:
+    """Test _sync_job() full pipeline orchestration."""
+
+    @staticmethod
+    def _make_test_db():
+        """Factory: create an in-memory DB with all required tables."""
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sync_state (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        conn.commit()
+        return conn
+
+    def test_sync_job_orchestrates_full_pipeline(self):
+        """_sync_job loads repos, pulls, syncs each, updates progress."""
+        from app.plugins.doc_search import _sync_lock
+        from unittest.mock import patch
+
+        mock_repos = [
+            {"name": "repo-a", "path": "/tmp/repo-a"},
+            {"name": "repo-b", "path": "/tmp/repo-b"},
+        ]
+
+        async def _mock_git_pull(repo_path):
+            return {"ok": True, "stdout": "up to date", "stderr": ""}
+
+        async def _mock_sync_repo(name, path):
+            return {
+                "repo": name, "pulled": True, "total": 10,
+                "changed": 2, "deleted": 0, "errors": [],
+            }
+
+        # Ensure lock is not held before test
+        async def _release_lock():
+            if _sync_lock.locked():
+                _sync_lock.release()
+
+        asyncio.run(_release_lock())
+
+        async def _run():
+            with patch(
+                "app.plugins.doc_search._load_doc_repos", return_value=mock_repos
+            ), patch(
+                "app.plugins.doc_search._git_pull", side_effect=_mock_git_pull
+            ), patch(
+                "app.plugins.doc_search._sync_repo", side_effect=_mock_sync_repo
+            ), patch(
+                "app.plugins.doc_search._get_db", side_effect=self._make_test_db
+            ):
+                await _sync_job()
+                # After completion, lock should be released
+                assert not _sync_lock.locked()
+
+        asyncio.run(_run())
+
+    def test_sync_job_updates_progress_state(self):
+        """_sync_job writes sync_progress to sync_state during run."""
+        from app.plugins.doc_search import _sync_lock
+        from unittest.mock import patch
+
+        mock_repos = [{"name": "repo-x", "path": "/tmp/repo-x"}]
+
+        async def _mock_git_pull(repo_path):
+            return {"ok": True, "stdout": "", "stderr": ""}
+
+        async def _mock_sync_repo(name, path):
+            return {
+                "repo": name, "pulled": True, "total": 5,
+                "changed": 0, "deleted": 0, "errors": [],
+            }
+
+        # Release lock if held
+        async def _release_lock():
+            if _sync_lock.locked():
+                _sync_lock.release()
+
+        asyncio.run(_release_lock())
+
+        async def _run():
+            with patch(
+                "app.plugins.doc_search._load_doc_repos", return_value=mock_repos
+            ), patch(
+                "app.plugins.doc_search._git_pull", side_effect=_mock_git_pull
+            ), patch(
+                "app.plugins.doc_search._sync_repo", side_effect=_mock_sync_repo
+            ), patch(
+                "app.plugins.doc_search._get_db", side_effect=self._make_test_db
+            ):
+                await _sync_job()
+
+        asyncio.run(_run())
+
+    def test_sync_job_continues_on_git_failure(self):
+        """Git pull failure for one repo does not stop other repos."""
+        from app.plugins.doc_search import _sync_lock
+        from unittest.mock import patch
+
+        mock_repos = [
+            {"name": "repo-bad", "path": "/tmp/bad"},
+            {"name": "repo-good", "path": "/tmp/good"},
+        ]
+
+        call_order = []
+
+        async def _mock_git_pull(repo_path):
+            call_order.append(("pull", repo_path))
+            if "bad" in repo_path:
+                return {"ok": False, "stdout": "", "stderr": "failed"}
+            return {"ok": True, "stdout": "", "stderr": ""}
+
+        async def _mock_sync_repo(name, path):
+            call_order.append(("sync", name))
+            return {
+                "repo": name, "pulled": True, "total": 1,
+                "changed": 0, "deleted": 0, "errors": [],
+            }
+
+        async def _release_lock():
+            if _sync_lock.locked():
+                _sync_lock.release()
+
+        asyncio.run(_release_lock())
+
+        async def _run():
+            with patch(
+                "app.plugins.doc_search._load_doc_repos", return_value=mock_repos
+            ), patch(
+                "app.plugins.doc_search._git_pull", side_effect=_mock_git_pull
+            ), patch(
+                "app.plugins.doc_search._sync_repo", side_effect=_mock_sync_repo
+            ), patch(
+                "app.plugins.doc_search._get_db", side_effect=self._make_test_db
+            ):
+                await _sync_job()
+
+        asyncio.run(_run())
+
+        # Both repos should have been pulled
+        pulls = [c for c in call_order if c[0] == "pull"]
+        assert len(pulls) == 2
+
+        # Both repos should have been synced (bad repo still gets synced)
+        syncs = [c for c in call_order if c[0] == "sync"]
+        assert len(syncs) == 2
