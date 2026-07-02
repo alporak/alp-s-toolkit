@@ -576,22 +576,13 @@ async def competence_chart():
 | A4 | No existing plugin uses `order: 45` — confirmed by checking all JS plugin files | Common Pitfalls | If another plugin has order 45, they'll sort alphabetically or by registration order. Check during implementation. From codebase read: GPS=1, Logs=2, Release=5. Jira.js line 46 registration — order not explicitly listed in the grep result (need to check full registration at line 46). |
 | A5 | The competence backend `_sync_job()` marks `in_progress` in SQLite, so frontend polling via `GET /api/competence/sync/status` will correctly detect completion | Code Examples | Verified by reading competence.py lines 236-371: `in_progress` is set to "1" at line 248 and reset to "0" in the `finally` block at line 371. Polling is reliable. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Chart type: bar vs combined bar+line?**
-   - What we know: Bar chart shows return rate clearly for discrete periods. A combined chart (bar for attempts/returns + line for rate) provides richer context.
-   - What's unclear: User preference — simpler single-metric bar chart vs. richer multi-trace visualization.
-   - Recommendation: Start with a bar chart for return_rate_pct. Can add attempts/returns as a second trace or separate tab later. This matches the Phase 1 exit criteria ("Chart renders with period labels on x-axis, return rate on y-axis").
+1. **Chart type: bar vs combined bar+line?** RESOLVED: Bar chart for `return_rate_pct` with bar text (rate %) and hover tooltips showing attempts/returns via customdata. Matches exit criteria.
 
-2. **Should the chart endpoint reuse `competence_stats()` or compute independently?**
-   - What we know: `competence_stats()` already returns `[{period, attempts, returns, return_rate_pct}]`. The chart endpoint needs the same data.
-   - What's unclear: Whether to call `_load_transitions_df()` + compute independently (DRY violation but decoupled) vs. convert `competence_stats()` to a reusable helper.
-   - Recommendation: The chart endpoint should have its own computation (call `_load_transitions_df()` + group + format) to avoid coupling to the JSON serialization format of the stats endpoint. This also allows the chart to include richer data (customdata for hover text) that the stats endpoint doesn't need.
+2. **Should the chart endpoint reuse `competence_stats()` or compute independently?** RESOLVED: `_load_transitions_df()` + independent computation in chart endpoint. Allows richer hover data (customdata) and avoids coupling to stats JSON format.
 
-3. **Responsiveness: mobile-friendly chart?**
-   - What we know: The existing app is desktop-only (no mobile breakpoints observed in the plugin patterns). Plotly charts are responsive when `config={'responsive': true}` is set.
-   - What's unclear: Whether mobile support is needed for this internal tool.
-   - Recommendation: Add `config={'responsive': true}` to the Plotly figure for forward-compatibility. Use `width: "100%"` on the iframe. No additional mobile layout work needed unless requested.
+3. **Responsiveness: mobile-friendly chart?** RESOLVED: Add `config={'responsive': true}` on Plotly figure. Iframe uses `width: 100%`. No additional mobile layout work needed.
 
 ## Environment Availability
 

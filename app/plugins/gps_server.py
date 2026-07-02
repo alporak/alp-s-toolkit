@@ -86,6 +86,8 @@ def _server_from_cfg(cfg: dict) -> TeltonikaServer:
         tls_key_path=cfg.get("server_tls_key_path", ""),
         tls_ca_path=cfg.get("server_tls_ca_path", ""),
         tls_verify_client=cfg.get("server_tls_verify_client", False),
+        https_response_enabled=cfg.get("server_https_response_enabled", False),
+        https_response_body=cfg.get("server_https_response_body", ""),
     )
 
 
@@ -98,6 +100,8 @@ def _settings_response(cfg: dict) -> dict:
         "tls_key_path": cfg.get("server_tls_key_path", ""),
         "tls_ca_path": cfg.get("server_tls_ca_path", ""),
         "tls_verify_client": cfg.get("server_tls_verify_client", False),
+        "https_response_enabled": cfg.get("server_https_response_enabled", False),
+        "https_response_body": cfg.get("server_https_response_body", ""),
         "avl_ids_path": cfg.get("avl_ids_path", ""),
     }
 
@@ -241,6 +245,8 @@ class ServerSettings(BaseModel):
     tls_key_path: Optional[str] = None
     tls_ca_path: Optional[str] = None
     tls_verify_client: Optional[bool] = None
+    https_response_enabled: Optional[bool] = None
+    https_response_body: Optional[str] = None
     avl_ids_path: Optional[str] = None
 
 
@@ -495,6 +501,12 @@ class GPSServerPlugin(ToolkitPlugin):
                 need_restart = True
             if req.tls_verify_client is not None:
                 updates["server_tls_verify_client"] = tls_verify_client
+                need_restart = True
+            if req.https_response_enabled is not None:
+                updates["server_https_response_enabled"] = req.https_response_enabled
+                need_restart = True
+            if req.https_response_body is not None:
+                updates["server_https_response_body"] = req.https_response_body
                 need_restart = True
             if req.avl_ids_path is not None:
                 updates["avl_ids_path"] = req.avl_ids_path

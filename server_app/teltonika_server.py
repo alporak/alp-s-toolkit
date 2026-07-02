@@ -637,7 +637,9 @@ class TeltonikaServer:
                  tls_cert_path: str = '',
                  tls_key_path: str = '',
                  tls_ca_path: str = '',
-                 tls_verify_client: bool = False):
+                 tls_verify_client: bool = False,
+                 https_response_enabled: bool = False,
+                 https_response_body: str = ''):
         self.port = port
         self.protocol_mode = protocol.upper()
         self.tls_enabled = bool(tls_enabled)
@@ -645,6 +647,8 @@ class TeltonikaServer:
         self.tls_key_path = tls_key_path or ''
         self.tls_ca_path = tls_ca_path or ''
         self.tls_verify_client = bool(tls_verify_client)
+        self.https_response_enabled = bool(https_response_enabled)
+        self.https_response_body = https_response_body or '{"status":"ok","server":"alps-toolkit"}'
         self._ssl_context: ssl.SSLContext | None = None
         self.running = False
 
@@ -978,6 +982,14 @@ class TeltonikaServer:
                 buf = buf[1:]
                 continue
 
+            # ── HTTPS GET response (protocol sniffing on TLS port) ──────────
+            if self.https_response_enabled and buf.startswith(b'GET '):
+                if b'\r\n\r\n' in buf:
+                    self._handle_http_get(sock)
+                    self._close_tcp(sock)
+                    return
+                break
+
             # IMEI handshake (17 bytes: 00 0F + 15 ASCII)
             if len(buf) >= 2 and buf[0:2] == b'\x00\x0F':
                 if len(buf) < 17:
@@ -1081,6 +1093,24 @@ class TeltonikaServer:
         except:
             pass
         self.log(f"TCP disconnect (IMEI={imei or '?'})", "DISC")
+
+    def _handle_http_get(self, sock):
+        response_body = self.https_response_body
+        content_type = "application/json" if response_body.strip().startswith(('{', '[')) else "text/plain"
+        http_response = (
+            "HTTP/1.1 200 OK\r\n"
+            f"Content-Type: {content_type}\r\n"
+            f"Content-Length: {len(response_body.encode('utf-8'))}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            f"{response_body}"
+        ).encode('utf-8')
+        try:
+            sock.sendall(http_response)
+            addr = self.tcp_clients.get(sock, ('?', '?'))
+            self.log(f"HTTPS GET response sent to {addr[0]}:{addr[1]}", "HTTP")
+        except Exception as e:
+            self.log(f"HTTPS GET send error: {e}", "ERROR")
 
     # ═══════════════════════════════════════════════════════════════════════════
     #  UDP

@@ -637,22 +637,13 @@ createTabs(mainContainer, [
 | A5 | The `jira` Python package v3.10.5 is compatible with the Jira Cloud REST API v2 endpoints used (`search_issues`, `myself`) | Standard Stack | Low — actively maintained package; verified working in current codebase via `release_creator.py` and existing sync. |
 | A6 | SQLite in WAL mode supports concurrent reads from pandas `read_sql_query` + WAL writers from sync job without deadlocks | Don't Hand-Roll | Low — WAL mode is designed for this pattern; verified working in M1 codebase. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Should `_parse_changelog` process entries in chronological or reverse-chronological order?**
-   - What we know: Current code iterates forward through `changelog.values` (reverse-chronological, newest first). The `in_testing` state machine is tolerant of this order for the simple case, but extended attribution fields benefit from oldest-first processing.
-   - What's unclear: Whether reversing entries (oldest-first) could break the state machine for edge cases like overlapping status transitions.
-   - Recommendation: **Reverse entries (oldest-first)** for the extended parser. Test with known changelog data. The state machine's `in_testing` boolean works correctly either way because it tracks the most recent state per-ticket, not per-entry. Oldest-first is more intuitive to reason about.
+1. **Should `_parse_changelog` process entries in chronological or reverse-chronological order?** RESOLVED: Reverse entries to oldest-first. State machine uses per-ticket `in_testing` boolean which works correctly either direction. Oldest-first is more intuitive.
 
-2. **What should `/summary` "most_returned" list include when there are ties?**
-   - What we know: FR10.4 spec says `"most_returned": [{"key": "...", "returns": 4}]` — an array.
-   - What's unclear: How many items? Only tickets tied for highest return count? Top 5? All with returns > 0?
-   - Recommendation: Return top 5 tickets by return count (not just ties for #1). Include at minimum the highest-returned ticket(s). This provides useful data for Phase 4's overview cards.
+2. **What should `/summary` "most_returned" list include when there are ties?** RESOLVED: Return top 5 tickets by return count (not just ties for #1). Includes highest-returned ticket(s) at minimum.
 
-3. **Should `/tickets` be paginated server-side or client-side?**
-   - What we know: NFR8 says "paginated if >100 results". M1 has no pagination in /stats (returns all periods as JSON).
-   - What's unclear: Whether to implement `?page=1&limit=50` query params or return all and let the frontend paginate.
-   - Recommendation: Return all results from `/tickets` initially (typical datasets are <500 tickets). Add pagination (`?offset=0&limit=100`) only if performance testing shows >500ms response. The frontend `createTable()` already has client-side `maxRows` parameter (core.js line 193) which handles display clipping.
+3. **Should `/tickets` be paginated server-side or client-side?** RESOLVED: Return all results initially (<500 tickets typical). Client-side `createTable()` handles display clipping via `maxRows`. Server-side pagination deferred unless >500ms.
 
 ## Environment Availability
 

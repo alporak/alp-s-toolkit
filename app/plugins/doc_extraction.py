@@ -119,6 +119,89 @@ def extract_docx(file_path: str) -> str:
         return ""
 
 
+def docx_to_html(file_path: str) -> str:
+    """Convert .docx to basic formatted HTML preserving paragraphs and bold/italic.
+
+    Produces simple HTML with <p>, <b>, <i> tags and <table> for tables.
+    Returns empty string on failure.
+    """
+    try:
+        from docx import Document
+        from docx.oxml.ns import qn
+    except ImportError:
+        return ""
+
+    try:
+        doc = Document(file_path)
+        parts: list[str] = []
+
+        for para in doc.paragraphs:
+            if not para.text.strip():
+                parts.append("<p>&nbsp;</p>")
+                continue
+
+            runs_html: list[str] = []
+            for run in para.runs:
+                text = _escape_html(run.text)
+                if not text:
+                    continue
+                if run.bold and run.italic:
+                    runs_html.append(f"<b><i>{text}</i></b>")
+                elif run.bold:
+                    runs_html.append(f"<b>{text}</b>")
+                elif run.italic:
+                    runs_html.append(f"<i>{text}</i>")
+                else:
+                    runs_html.append(text)
+
+            style = para.style.name if para.style else ""
+            if style.startswith("Heading"):
+                level = style.replace("Heading ", "").strip()
+                if level.isdigit():
+                    parts.append(f"<h{level}>{''.join(runs_html)}</h{level}>")
+                    continue
+            parts.append(f"<p>{''.join(runs_html)}</p>")
+
+        for table in doc.tables:
+            rows_html: list[str] = []
+            for row in table.rows:
+                cells_html = "".join(
+                    f"<td>{_escape_html(cell.text)}</td>" for cell in row.cells
+                )
+                rows_html.append(f"<tr>{cells_html}</tr>")
+            parts.append(f"<table border='1' cellpadding='4' cellspacing='0'>{''.join(rows_html)}</table>")
+
+        return "\n".join(parts)
+    except Exception as exc:
+        logger.debug("Failed to convert .docx to HTML: %s: %s", file_path, exc)
+        return ""
+
+
+def _escape_html(text: str) -> str:
+    """Escape &, <, > for safe HTML embedding."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def text_to_html(text: str) -> str:
+    """Convert plain text to basic HTML with <p> paragraph breaks."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    parts: list[str] = []
+    buf: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            buf.append(_escape_html(stripped))
+        else:
+            if buf:
+                parts.append(f"<p>{' '.join(buf)}</p>")
+                buf.clear()
+    if buf:
+        parts.append(f"<p>{' '.join(buf)}</p>")
+    return "\n".join(parts) if parts else f"<pre>{_escape_html(text)}</pre>"
+
+
 def extract_pdf(file_path: str) -> str:
     """Extract text from a .pdf file.
 
@@ -319,6 +402,7 @@ def extract_text(file_path: str) -> dict:
     Returns:
         dict with keys:
             text      — extracted text (empty string on failure)
+            html      — formatted HTML version (for preview rendering)
             encoding  — detected encoding name, e.g. ``"utf_8"``
             needs_ocr — ``True`` when PDF has pages > 0 but text < 20 chars
             sha256    — lowercase hex SHA-256 digest of the file
@@ -326,6 +410,7 @@ def extract_text(file_path: str) -> dict:
     """
     result: dict = {
         "text": "",
+        "html": "",
         "encoding": "utf_8",
         "needs_ocr": False,
         "sha256": "",
@@ -387,5 +472,11 @@ def extract_text(file_path: str) -> dict:
             # If we can't even open it with pypdf, it's truly corrupt — not scanned
             if result["error"] is None:
                 result["error"] = "PDF extraction failed (possible corrupt file)"
+
+    # 7. Generate formatted HTML for preview rendering
+    if text and ext == ".docx":
+        result["html"] = docx_to_html(file_path) or text_to_html(text)
+    elif text:
+        result["html"] = text_to_html(text)
 
     return result

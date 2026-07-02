@@ -235,6 +235,13 @@ def get_marker_color(speed, ignition):
         return '#FF8C00' # Orange = Idling
     return '#00FF00'     # Green = Moving
 
+def _safe_float(val_str):
+    try:
+        return float(val_str)
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_log(content_str, progress_callback=None):
     data_points = []
     events = []
@@ -841,7 +848,7 @@ def parse_log(content_str, progress_callback=None):
                         rssi_r = int(m_qcsq.group(2)) if m_qcsq.group(2) else None
                         rsrp_r = int(m_qcsq.group(3)) if m_qcsq.group(3) else None
                         sinr_r = int(m_qcsq.group(4)) if m_qcsq.group(4) else None
-                        rsrq_r = float(m_qcsq.group(5)) if m_qcsq.group(5) else None
+                        rsrq_r = _safe_float(m_qcsq.group(5)) if m_qcsq.group(5) else None
                         modem_info['signal_readings'].append({
                             'Timestamp': resolve_ts(line, ts_ar), 'CSQ': None,
                             'RSSI_dBm': rssi_r, 'RSRP_dBm': rsrp_r,
@@ -945,7 +952,7 @@ def parse_log(content_str, progress_callback=None):
                                 'RSSI_dBm': int(_m_qcsq_c.group(2)) if _m_qcsq_c.group(2) else None,
                                 'RSRP_dBm': int(_m_qcsq_c.group(3)) if _m_qcsq_c.group(3) else None,
                                 'SINR_dB': int(_m_qcsq_c.group(4)) if _m_qcsq_c.group(4) else None,
-                                'RSRQ_dB': float(_m_qcsq_c.group(5)) if _m_qcsq_c.group(5) else None,
+                                'RSRQ_dB': _safe_float(_m_qcsq_c.group(5)) if _m_qcsq_c.group(5) else None,
                                 'Network': _nw_c,
                             })
 
@@ -1145,9 +1152,9 @@ def parse_log(content_str, progress_callback=None):
             
             # GPS fields
             _m = rx_rec_latitude.search(line)
-            if _m: _rec_current['Latitude'] = float(_m.group(1))
+            if _m: _rec_current['Latitude'] = _safe_float(_m.group(1))
             _m = rx_rec_longitude.search(line)
-            if _m: _rec_current['Longitude'] = float(_m.group(1))
+            if _m: _rec_current['Longitude'] = _safe_float(_m.group(1))
             _m = rx_rec_altitude.search(line)
             if _m: _rec_current['Altitude'] = int(_m.group(1))
             _m = rx_rec_angle.search(line)
@@ -1155,7 +1162,7 @@ def parse_log(content_str, progress_callback=None):
             _m = rx_rec_speed.search(line)
             if _m: _rec_current['Speed'] = int(_m.group(1))
             _m = rx_rec_hdop.search(line)
-            if _m: _rec_current['HDOP'] = float(_m.group(1))
+            if _m: _rec_current['HDOP'] = _safe_float(_m.group(1))
             _m = rx_rec_sat.search(line)
             if _m: _rec_current['SatInUse'] = int(_m.group(1))
             _m = rx_rec_fix.search(line)
@@ -1270,9 +1277,9 @@ def parse_log(content_str, progress_callback=None):
         m_rsrp_s = rx_status_rsrp.search(line)
         if m_rsrp_s: _status_snapshot['rsrp_dbm'] = int(m_rsrp_s.group(1))
         m_sinr_s = rx_status_sinr.search(line)
-        if m_sinr_s: _status_snapshot['sinr_db'] = float(m_sinr_s.group(1))
+        if m_sinr_s: _status_snapshot['sinr_db'] = _safe_float(m_sinr_s.group(1))
         m_rsrq_s = rx_status_rsrq.search(line)
-        if m_rsrq_s: _status_snapshot['rsrq_db'] = float(m_rsrq_s.group(1))
+        if m_rsrq_s: _status_snapshot['rsrq_db'] = _safe_float(m_rsrq_s.group(1))
         m_nw_s = rx_status_network.search(line)
         if m_nw_s:
             _status_snapshot['network'] = m_nw_s.group(1)

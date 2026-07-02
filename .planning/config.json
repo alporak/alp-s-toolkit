@@ -1,0 +1,11 @@
+{
+  "project_name": "Competence & Performance",
+  "mode": "auto",
+  "frontend_phase_separate": true,
+  "jira_instance": "teltonika-telematics.atlassian.net",
+  "use_case": "both",
+  "created": "2026-06-17",
+  "requirements_version": 1,
+  "roadmap_version": 1,
+  "nyquist_validation": false
+}

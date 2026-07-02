@@ -464,7 +464,8 @@ registerPlugin({
       // Build preview panel
       const MAX_PREVIEW = 5000;
       const text = data.text || "";
-      const truncated = text.length > MAX_PREVIEW;
+      const html = data.html || "";
+      const truncated = text.length > MAX_PREVIEW || html.length > MAX_PREVIEW * 2;
       const displayText = truncated ? text.substring(0, MAX_PREVIEW) : text;
 
       const result = this._searchResults[index];
@@ -492,7 +493,7 @@ registerPlugin({
       titleText.textContent = filename;
       headerRow.appendChild(titleText);
 
-      // "Open file" button — opens raw file via backend
+      // "Open file" button — opens raw file via backend (inline)
       const openBtn = h("button", {
         className: "btn btn-primary btn-sm",
         style: { fontSize: "11px", padding: "2px 10px", marginLeft: "auto" },
@@ -513,15 +514,26 @@ registerPlugin({
       pathLine.textContent = filePath;
       previewPanel.appendChild(pathLine);
 
-      // Preview text with highlights
-      const textFrag = this._highlightTerms(displayText, this._currentQuery);
-      previewPanel.appendChild(textFrag);
+      // Rendered content — use HTML if available, otherwise plain text with highlights
+      if (html) {
+        const htmlDiv = h("div", {
+          style: { lineHeight: "1.6" },
+        });
+        // XSS-safe: all HTML was generated server-side from docx (no user input)
+        htmlDiv.innerHTML = html;
+        previewPanel.appendChild(htmlDiv);
+      } else {
+        const textFrag = this._highlightTerms(displayText, this._currentQuery);
+        const textDiv = h("div", { style: { whiteSpace: "pre-wrap", lineHeight: "1.5" } });
+        textDiv.appendChild(textFrag);
+        previewPanel.appendChild(textDiv);
+      }
 
       // "Show more" indicator if truncated
       if (truncated) {
         const moreDiv = h("div", {
           style: { fontSize: "11px", color: "var(--text-muted)", marginTop: "8px", fontStyle: "italic" },
-        }, "Showing first " + MAX_PREVIEW.toLocaleString() + " chars \u2014 use \"Open file\" for full content");
+        }, "Showing first " + MAX_PREVIEW.toLocaleString() + " chars — use \"Open file\" for full content");
         previewPanel.appendChild(moreDiv);
       }
 

@@ -36,7 +36,7 @@ logger = logging.getLogger("doc_search")
 
 # ── Constants ──────────────────────────────────────────────
 DB_PATH = os.path.join(os.path.dirname(__file__), "doc_search.db")
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # ── Module-level state ─────────────────────────────────────
 _db_lock = threading.Lock()
@@ -228,6 +228,7 @@ def _upsert_document(conn: sqlite3.Connection, repo: str, rel_path: str, result:
     Returns the ``rowid`` of the inserted/updated row.
     """
     text = result.get("text", "") or ""
+    html = result.get("html", "") or ""
     sha = result.get("sha256", "") or ""
     encoding = result.get("encoding", "utf_8") or "utf_8"
     needs_ocr = 1 if result.get("needs_ocr") else 0
@@ -236,16 +237,17 @@ def _upsert_document(conn: sqlite3.Connection, repo: str, rel_path: str, result:
     conn.execute("BEGIN IMMEDIATE")
     try:
         conn.execute(
-            """INSERT INTO doc_metadata (repo, relative_path, full_text, sha256,
+            """INSERT INTO doc_metadata (repo, relative_path, full_text, full_html, sha256,
                encoding, needs_ocr, last_extracted)
-               VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+               VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
                ON CONFLICT(repo, relative_path) DO UPDATE SET
                  full_text=excluded.full_text,
+                 full_html=excluded.full_html,
                  sha256=excluded.sha256,
                  encoding=excluded.encoding,
                  needs_ocr=excluded.needs_ocr,
                  last_extracted=excluded.last_extracted""",
-            (repo, rel_path, text, sha, encoding, needs_ocr),
+            (repo, rel_path, text, html, sha, encoding, needs_ocr),
         )
 
         # Retrieve the rowid for the (repo, relative_path) pair
@@ -556,6 +558,7 @@ def _ensure_schema() -> None:
                     repo TEXT NOT NULL,
                     relative_path TEXT NOT NULL,
                     full_text TEXT NOT NULL DEFAULT '',
+                    full_html TEXT NOT NULL DEFAULT '',
                     sha256 TEXT NOT NULL DEFAULT '',
                     encoding TEXT NOT NULL DEFAULT 'utf_8',
                     needs_ocr INTEGER NOT NULL DEFAULT 0,
@@ -574,8 +577,15 @@ def _ensure_schema() -> None:
                     ON doc_metadata(repo);
 
                 INSERT OR REPLACE INTO sync_state (key, value)
-                    VALUES ('schema_version', '1');
+                    VALUES ('schema_version', '2');
             """)
+
+            # Migration: add full_html column for v1 → v2
+            try:
+                conn.execute("ALTER TABLE doc_metadata ADD COLUMN full_html TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
             conn.commit()
             logger.info("DocSearch SQLite v%s initialized at %s", SCHEMA_VERSION, DB_PATH)
         finally:
@@ -699,21 +709,28 @@ class DocSearchPlugin(ToolkitPlugin):
                 conn = _get_db()
                 try:
                     row = conn.execute(
-                        "SELECT full_text FROM doc_metadata WHERE repo = ? AND relative_path = ?",
+                        "SELECT full_text, full_html FROM doc_metadata WHERE repo = ? AND relative_path = ?",
                         (repo, path),
                     ).fetchone()
-                    return row["full_text"] if row else None
+                    if row is None:
+                        return None
+                    return {"text": row["full_text"], "html": row["full_html"] or ""}
                 finally:
                     conn.close()
 
-            text = await asyncio.to_thread(_run_preview)
-            if text is None:
+            result = await asyncio.to_thread(_run_preview)
+            if result is None:
                 raise HTTPException(
                     status_code=404,
                     detail={"error": "Document not found in index"},
                 )
 
-            return {"repo": repo, "path": path, "text": text[:10000]}
+            return {
+                "repo": repo,
+                "path": path,
+                "text": result["text"][:10000],
+                "html": result["html"],
+            }
 
         # ── Open file endpoint ───────────────────────────────
 
@@ -757,7 +774,12 @@ class DocSearchPlugin(ToolkitPlugin):
             }
             media_type = media_types.get(ext, "application/octet-stream")
 
-            return FileResponse(resolved, media_type=media_type, filename=os.path.basename(resolved))
+            return FileResponse(
+                resolved,
+                media_type=media_type,
+                filename=os.path.basename(resolved),
+                content_disposition_type="inline",
+            )
 
         # ── Repos endpoint ───────────────────────────────────
 
