@@ -305,45 +305,57 @@ registerPlugin({
       onmouseleave: function () { if (self._focusedIndex !== index) this.style.background = ""; },
     });
 
-    // Left side: icon + filename
+    // Top row: icon + filename + path
+    const topRow = h("div", {
+      style: { display: "flex", alignItems: "flex-start", gap: "8px", marginBottom: "4px" },
+    });
+
+    // Icon + filename + relative path
     const left = h("div", {
+      style: { flex: "1", minWidth: 0 },
+    });
+
+    const nameLine = h("div", {
       style: { display: "flex", alignItems: "center", gap: "8px" },
     });
 
-    const iconSpan = h("span", { style: { fontSize: "16px" } });
+    const iconSpan = h("span", { style: { fontSize: "16px", flexShrink: 0 } });
     iconSpan.textContent = icon;
-    left.appendChild(iconSpan);
+    nameLine.appendChild(iconSpan);
 
     const nameSpan = h("span", { style: { fontWeight: "600" } });
     nameSpan.textContent = result.filename || "";
-    left.appendChild(nameSpan);
+    nameLine.appendChild(nameSpan);
 
-    // Right side: repo badge + score
-    const right = h("div", {
-      style: { display: "flex", alignItems: "center", gap: "8px", marginLeft: "auto" },
-    });
-
+    // Repo badge
     const badge = h("span", {
       style: {
         background: badgeColor, color: "#fff", padding: "1px 8px",
-        borderRadius: "10px", fontSize: "11px", fontWeight: "600",
+        borderRadius: "10px", fontSize: "11px", fontWeight: "600", flexShrink: 0,
       },
     });
     badge.textContent = result.repo || "";
-    right.appendChild(badge);
+    nameLine.appendChild(badge);
 
+    left.appendChild(nameLine);
+
+    // Relative path below filename
+    if (result.path && result.path !== result.filename) {
+      const pathLine = h("div", {
+        style: { marginTop: "2px", fontSize: "11px", color: "var(--text-muted)", wordBreak: "break-all" },
+      });
+      pathLine.textContent = result.path;
+      left.appendChild(pathLine);
+    }
+
+    // Score (right side)
     const score = h("span", {
-      style: { color: "var(--text-muted)", fontSize: "11px" },
+      style: { color: "var(--text-muted)", fontSize: "11px", flexShrink: 0, marginLeft: "auto" },
     });
     score.textContent = typeof result.score === "number" ? result.score.toFixed(2) : "";
-    right.appendChild(score);
 
-    // Top row
-    const topRow = h("div", {
-      style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" },
-    });
     topRow.appendChild(left);
-    topRow.appendChild(right);
+    topRow.appendChild(score);
     row.appendChild(topRow);
 
     // Snippet line
@@ -450,35 +462,68 @@ registerPlugin({
       if (this._expandedIndex !== index) return;
 
       // Build preview panel
-      const text = (data.text || "").substring(0, 500);
-      const displayText = text.length >= 500 ? text + "..." : text;
+      const MAX_PREVIEW = 5000;
+      const text = data.text || "";
+      const truncated = text.length > MAX_PREVIEW;
+      const displayText = truncated ? text.substring(0, MAX_PREVIEW) : text;
 
       const result = this._searchResults[index];
       const filename = result ? result.filename : "";
+      const repoName = result ? result.repo : "";
+      const filePath = result ? result.path : "";
 
       const previewPanel = h("div", {
         style: {
           marginLeft: "28px", padding: "10px 14px",
           background: "var(--bg-secondary)", borderRadius: "6px",
           borderLeft: "3px solid var(--accent)", fontSize: "13px",
-          maxHeight: "200px", overflowY: "auto", marginBottom: "8px",
+          maxHeight: "350px", overflowY: "auto", marginBottom: "8px",
         },
       });
 
-      // Header
+      // Header with filename + "Open file" button
       const headerRow = h("div", {
-        style: { fontWeight: "600", marginBottom: "4px", fontSize: "12px", color: "var(--text-muted)" },
+        style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "6px" },
       });
-      const previewLabel = document.createTextNode("Preview: ");
-      headerRow.appendChild(previewLabel);
-      const nameSpan = h("span", { style: { color: "var(--text-primary)" } });
-      nameSpan.textContent = filename;
-      headerRow.appendChild(nameSpan);
+
+      const titleText = h("span", {
+        style: { fontWeight: "600", fontSize: "12px", color: "var(--text-primary)" },
+      });
+      titleText.textContent = filename;
+      headerRow.appendChild(titleText);
+
+      // "Open file" button — opens raw file via backend
+      const openBtn = h("button", {
+        className: "btn btn-primary btn-sm",
+        style: { fontSize: "11px", padding: "2px 10px", marginLeft: "auto" },
+        onclick: (e) => {
+          e.stopPropagation();
+          const url = "/api/doc_search/open/" + encodeURIComponent(repoName) + "/" + encodeURIComponent(filePath);
+          window.open(url, "_blank");
+        },
+      }, "Open file");
+      headerRow.appendChild(openBtn);
+
       previewPanel.appendChild(headerRow);
+
+      // Full file path below header
+      const pathLine = h("div", {
+        style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "8px", wordBreak: "break-all" },
+      });
+      pathLine.textContent = filePath;
+      previewPanel.appendChild(pathLine);
 
       // Preview text with highlights
       const textFrag = this._highlightTerms(displayText, this._currentQuery);
       previewPanel.appendChild(textFrag);
+
+      // "Show more" indicator if truncated
+      if (truncated) {
+        const moreDiv = h("div", {
+          style: { fontSize: "11px", color: "var(--text-muted)", marginTop: "8px", fontStyle: "italic" },
+        }, "Showing first " + MAX_PREVIEW.toLocaleString() + " chars \u2014 use \"Open file\" for full content");
+        previewPanel.appendChild(moreDiv);
+      }
 
       // Insert after result row
       resultRow.insertAdjacentElement("afterend", previewPanel);

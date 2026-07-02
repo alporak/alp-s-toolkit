@@ -26,6 +26,7 @@ import threading
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Path, Query
+from fastapi.responses import FileResponse
 
 from app import config
 from app.plugins.base import ToolkitPlugin
@@ -712,7 +713,51 @@ class DocSearchPlugin(ToolkitPlugin):
                     detail={"error": "Document not found in index"},
                 )
 
-            return {"repo": repo, "path": path, "text": text[:2000]}
+            return {"repo": repo, "path": path, "text": text[:10000]}
+
+        # ── Open file endpoint ───────────────────────────────
+
+        @app.get("/api/doc_search/open/{repo}/{path:path}")
+        async def doc_search_open_file(repo: str, path: str = Path(..., description="Document relative path")):
+            """Serve the raw file for in-browser viewing/download.
+
+            Validates path traversal before serving. Returns the file with
+            its extension-determined MIME type for native browser handling.
+            """
+            repos = _load_doc_repos()
+            repo_entry = next((r for r in repos if r["name"] == repo), None)
+            if repo_entry is None:
+                raise HTTPException(status_code=404, detail={"error": "Repo not found"})
+
+            repo_root = repo_entry["path"]
+            full_path = os.path.join(repo_root, path)
+            resolved = os.path.realpath(full_path)
+            real_root = os.path.realpath(repo_root)
+
+            if not (resolved == real_root or resolved.startswith(real_root + os.sep)):
+                raise HTTPException(status_code=403, detail={"error": "Path traversal detected"})
+
+            if not os.path.isfile(resolved):
+                raise HTTPException(status_code=404, detail={"error": "File not found"})
+
+            # Determine media type by extension
+            ext = os.path.splitext(resolved)[1].lower()
+            media_types = {
+                ".pdf": "application/pdf",
+                ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ".doc": "application/msword",
+                ".rst": "text/plain",
+                ".txt": "text/plain",
+                ".md": "text/markdown",
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".xml": "application/xml",
+                ".html": "text/html",
+            }
+            media_type = media_types.get(ext, "application/octet-stream")
+
+            return FileResponse(resolved, media_type=media_type, filename=os.path.basename(resolved))
 
         # ── Repos endpoint ───────────────────────────────────
 
