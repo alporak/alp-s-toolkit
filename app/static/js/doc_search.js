@@ -493,14 +493,21 @@ registerPlugin({
       titleText.textContent = filename;
       headerRow.appendChild(titleText);
 
-      // "Open file" button — opens raw file via backend (inline)
+      // "Open file" button — launches native app via os.startfile()
       const openBtn = h("button", {
         className: "btn btn-primary btn-sm",
         style: { fontSize: "11px", padding: "2px 10px", marginLeft: "auto" },
-        onclick: (e) => {
+        onclick: async (e) => {
           e.stopPropagation();
-          const url = "/api/doc_search/open/" + encodeURIComponent(repoName) + "/" + encodeURIComponent(filePath);
-          window.open(url, "_blank");
+          try {
+            const url = "/api/doc_search/open/" + encodeURIComponent(repoName) + "/" + encodeURIComponent(filePath);
+            const resp = await api(url, { method: "POST" });
+            if (resp.status === "opened") {
+              toast("Opened in default app", "success", 1500);
+            }
+          } catch (err) {
+            // api() already toasts errors
+          }
         },
       }, "Open file");
       headerRow.appendChild(openBtn);

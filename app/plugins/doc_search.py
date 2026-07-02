@@ -732,15 +732,10 @@ class DocSearchPlugin(ToolkitPlugin):
                 "html": result["html"],
             }
 
-        # ── Open file endpoint ───────────────────────────────
+        # ── Open file endpoint (native app) ──────────────────
 
-        @app.get("/api/doc_search/open/{repo}/{path:path}")
-        async def doc_search_open_file(repo: str, path: str = Path(..., description="Document relative path")):
-            """Serve the raw file for in-browser viewing/download.
-
-            Validates path traversal before serving. Returns the file with
-            its extension-determined MIME type for native browser handling.
-            """
+        def _resolve_repo_path(repo: str, path: str) -> str:
+            """Resolve and validate a file path within a configured repo."""
             repos = _load_doc_repos()
             repo_entry = next((r for r in repos if r["name"] == repo), None)
             if repo_entry is None:
@@ -752,10 +747,38 @@ class DocSearchPlugin(ToolkitPlugin):
             real_root = os.path.realpath(repo_root)
 
             if not (resolved == real_root or resolved.startswith(real_root + os.sep)):
-                raise HTTPException(status_code=403, detail={"error": "Path traversal detected"})
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "Path traversal detected"},
+                )
 
             if not os.path.isfile(resolved):
                 raise HTTPException(status_code=404, detail={"error": "File not found"})
+
+            return resolved
+
+        @app.post("/api/doc_search/open/{repo}/{path:path}")
+        async def doc_search_open_native(repo: str, path: str = Path(..., description="Document relative path")):
+            """Open the file in its default Windows application (Word, Acrobat, etc.).
+
+            Calls ``os.startfile()`` which launches the native handler for the file type.
+            The browser stays on the search page — the file opens separately.
+            """
+            resolved = _resolve_repo_path(repo, path)
+            try:
+                os.startfile(resolved)
+                return {"status": "opened", "path": resolved}
+            except Exception as e:
+                raise HTTPException(status_code=500, detail={"error": f"Failed to open file: {e}"})
+
+        @app.get("/api/doc_search/open/{repo}/{path:path}")
+        async def doc_search_open_file(repo: str, path: str = Path(..., description="Document relative path")):
+            """Serve the raw file for in-browser viewing/download (fallback).
+
+            Validates path traversal before serving. Returns the file with
+            its extension-determined MIME type for native browser handling.
+            """
+            resolved = _resolve_repo_path(repo, path)
 
             # Determine media type by extension
             ext = os.path.splitext(resolved)[1].lower()
