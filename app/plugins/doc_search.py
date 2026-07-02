@@ -774,11 +774,16 @@ class DocSearchPlugin(ToolkitPlugin):
             }
             media_type = media_types.get(ext, "application/octet-stream")
 
+            # Office docs: force download so OS opens in native app (Word, etc.)
+            # PDFs/images: inline so browser renders them natively
+            office_exts = {".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt"}
+            disposition = "attachment" if ext in office_exts else "inline"
+
             return FileResponse(
                 resolved,
                 media_type=media_type,
                 filename=os.path.basename(resolved),
-                content_disposition_type="inline",
+                content_disposition_type=disposition,
             )
 
         # ── Repos endpoint ───────────────────────────────────
