@@ -1,62 +1,69 @@
 # Alps Toolkit
 
 ## Overview
-A FastAPI-based toolkit with plugin auto-discovery (`app/plugins/`). Plugins extend `ToolkitPlugin` base class and provide API routes + frontend SPAs. Currently hosts the Competence & Performance plugin.
+A FastAPI-based toolkit with plugin auto-discovery (`app/plugins/`). Plugins extend `ToolkitPlugin` base class and provide API routes + frontend SPAs. Ships with Competence & Performance analytics and Documentation Search Engine plugins.
 
 ## Use Case
-Internal developer tooling — Jira analytics dashboards, log parsing, GPS simulation, release management, and now documentation search.
+Internal developer tooling — Jira analytics dashboards, documentation search across internal repos, log parsing, GPS simulation, release management.
 
 ## Milestone History
 
-### M1: Core Plugin (COMPLETE — Phase 1 + 2)
-- **Phase 1**: Backend — SQLite cache, Jira changelog sync via `jira` package + httpx, ATTEMPT/RETURN state machine, stats/chart/sync/status API endpoints
-- **Phase 2**: Frontend — SPA plugin with bar chart (server-side Plotly HTML → iframe), sync button, status polling
-- **Artifacts**: `app/plugins/competence.py` (593 lines), `app/static/js/competence.js` (107 lines)
+### M1: Core Competence Plugin (COMPLETE — Phase 1 + 2)
+- Phase 1: Backend — SQLite, Jira sync, state machine, stats API
+- Phase 2: Frontend — SPA plugin with bar chart, sync button
 
 ### M2: Performance Analytics v2 (COMPLETE — Phase 3 + 4)
-- **Phase 3**: Backend — extended schema (8-col transitions + tickets), enhanced parsing with attribution, ticket metadata, 4 new API endpoints
-- **Phase 4**: Frontend — tabbed power-dashboard (Overview / Per Ticket / Charts), summary cards, sortable per-ticket table with expandable timeline, multi-chart views
-- **Artifacts**: `app/plugins/competence.py` (478 lines), `app/static/js/competence.js` (240 lines)
+- Phase 3: Backend — extended schema, attribution tracking, 8 endpoints
+- Phase 4: Frontend — tabbed power-dashboard, per-ticket table, multi-chart views
 
-## Current Milestone: M3 — Documentation Search Engine
+### M3: Documentation Search Engine (COMPLETE — Phase 5 + 6 + 7)
+- Phase 5: Extraction pipeline — 6 formats (docx/pdf/doc/rst/drawio/graphml), FTS5 schema, charset detection, SHA-256 fingerprinting
+- Phase 6: Sync engine — git pull from 3 repos, incremental index updates, BM25 search API, preview endpoint, path traversal protection
+- Phase 7: Frontend SPA — search-as-you-type, formatted HTML preview, file-type filters, keyboard nav, sync progress bar, repo settings UI, native "Open file" via os.startfile()
+- **Artifacts**: `app/plugins/doc_extraction.py` (484 lines), `app/plugins/doc_search.py` (926 lines), `app/static/js/doc_search.js` (1106 lines), `tests/test_doc_extraction.py` (280 lines)
 
-**Goal:** A unified, fast full-text search plugin across 3 internal documentation repos (~3000 files) — git pull, text extraction, search index, inline preview.
+## Current State (post-M3)
 
-**Target features:**
-- Git sync of 3 documentation repos (daily + on startup + manual button)
-- Text extraction from .docx, .pdf, .doc, .rst, .drawio, .graphml, and other formats
-- Fast full-text search index (unified across all repos)
-- Search UI: real-time results with match snippets
-- Inline file preview with search term highlighting
-- Follows competence plugin conventions
+Shipped M3 with ~2,800 lines of new code across 4 files. Working plugin serving ~1,100 indexed documents across 3 repos. Next milestone TBD.
 
 ## Tech Stack
 - **Backend**: FastAPI plugin (ToolkitPlugin base class)
-- **Database**: SQLite — WAL mode, per-plugin database files
-- **HTTP**: `httpx` async
-- **Frontend**: Vanilla JS SPA using core.js framework (h(), api(), registerPlugin())
-- **Search**: Whoosh or SQLite FTS5 (to be decided in research)
-- **Text extraction**: python-docx, PyPDF2/pdfplumber, python-pptx, doc2txt
+- **Database**: SQLite FTS5 — content-less mode, WAL, per-plugin DB files, auto-migration
+- **HTTP**: `httpx` async, `subprocess` for git operations
+- **Search**: SQLite FTS5 with BM25 ranking, `snippet()` highlighting
+- **Text extraction**: python-docx, pdfplumber (primary) + pypdf (fallback), doc2txt, docutils, xml.etree
+- **Encoding**: charset-normalizer for Baltic-locale legacy documents
+- **Frontend**: Vanilla JS SPA using core.js (h(), api(), registerPlugin()), no frameworks/no npm
+- **File serving**: os.startfile() for native app opening, FileResponse with MIME types
+
+## Key Decisions
+- Content-less FTS5 over Whoosh (zero deps, already in stack, 3:1 research consensus)
+- Batch extraction (100-file chunks, 2 workers) to prevent OOM on large PDF repos
+- All DB writes through `asyncio.to_thread()` — event-loop SQLite access corrupts on Windows
+- Formatted HTML preview via `docx_to_html()` converter preserving paragraphs/bold/italics/tables
+- `os.startfile()` for "Open file" — launches native Windows app instead of browser download
+- `_ensure_schema()` called at sync start — handles auto-recovered DB after corruption
+- Schema auto-migration: `ALTER TABLE` on version bump, WAL mode, `UNIQUE(repo, path)`
 
 ## Key Constraints
 1. Plugins auto-discovered from `app/plugins/` — module-level `plugin` attribute
 2. Plugin lifecycle: `register_routes()` → `startup()` → `shutdown()`
 3. No auth required (internal network tool)
 4. Git repos must be accessible from company network
-5. Search must handle legacy .doc (pre-2007) formats
+5. All blocking I/O via `asyncio.to_thread()` — never on event loop (Windows SQLite safety)
 
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.
 
-**After each phase transition** (via `/gsd-transition`):
+**After each phase transition:**
 1. Requirements invalidated? → Move to Out of Scope with reason
 2. Requirements validated? → Move to Validated with phase reference
 3. New requirements emerged? → Add to Active
 4. Decisions to log? → Add to Key Decisions
 5. "What This Is" still accurate? → Update if drifted
 
-**After each milestone** (via `/gsd-complete-milestone`):
+**After each milestone:**
 1. Full review of all sections
 2. Core Value check — still the right priority?
 3. Audit Out of Scope — reasons still valid?
@@ -64,4 +71,4 @@ This document evolves at phase transitions and milestone boundaries.
 
 ---
 
-*Last updated: 2026-07-01 | Milestone M3 started*
+*Last updated: 2026-07-02 | Milestone M3 complete*
