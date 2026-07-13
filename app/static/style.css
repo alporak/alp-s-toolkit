@@ -2028,3 +2028,45 @@ select.utt-input { cursor: pointer; }
   margin-left: auto; flex-shrink: 0;
 }
 
+/* ── Insights ────────────────────────────────────────────────── */
+.ins-content { padding: var(--sp-3); }
+.ins-summary { margin-bottom: var(--sp-3); }
+.ins-bar {
+  position: relative; height: 28px; background: var(--tk-navy);
+  border-radius: var(--radius-sm); overflow: hidden;
+}
+.ins-bar-fill { height: 100%; transition: width 0.4s var(--ease); }
+.ins-bar-fill.ins-ok { background: var(--tk-green); }
+.ins-bar-fill.ins-warn { background: var(--tk-warn); }
+.ins-bar-label {
+  position: absolute; inset: 0; display: flex; align-items: center;
+  justify-content: center; font-size: 0.82rem; font-weight: 600;
+  color: var(--tk-fg); text-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+.ins-hdr { font-size: 0.88rem; margin: var(--sp-3) 0 var(--sp-1); }
+.ins-day-grid { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.ins-tag {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 8px; border-radius: var(--radius-sm); font-size: 0.8rem;
+  border: none; cursor: default;
+}
+.ins-tag-miss { background: rgba(239, 68, 68, 0.2); color: var(--tk-warn); cursor: pointer; }
+.ins-tag-low { background: rgba(234, 179, 8, 0.2); color: #eab308; }
+.ins-tag-warn { background: rgba(251, 146, 60, 0.2); color: #fb923c; }
+.ins-tag-off { background: var(--tk-surface); color: var(--tk-fg-dim); }
+.ins-nwd-del { background: none; border: none; color: var(--tk-fg-dim); cursor: pointer; font-size: 1rem; padding: 0 2px; }
+.ins-nwd-del:hover { color: var(--tk-warn); }
+.ins-gap { color: var(--tk-warn); font-size: 0.85rem; }
+.ins-ontarget { color: var(--tk-green); font-size: 0.85rem; }
+.ins-drill {
+  margin: var(--sp-1) 0; padding: var(--sp-2); background: var(--tk-surface);
+  border-radius: var(--radius-sm); font-size: 0.8rem; cursor: pointer;
+}
+.ins-trend { margin-top: var(--sp-3); }
+.ins-trend-row { display: flex; gap: var(--sp-2); align-items: flex-end; height: 60px; }
+.ins-trend-bar-wrap { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; }
+.ins-trend-bar {
+  width: 100%; min-height: 2px; border-radius: 2px 2px 0 0;
+  background: var(--tk-accent); transition: height 0.3s var(--ease);
+}
+

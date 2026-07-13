@@ -441,3 +441,100 @@ def get_non_working_days() -> list[str]:
             return [r["date"] for r in rows]
         finally:
             conn.close()
+
+
+def get_non_working_days_in_range(d_from: str, d_to: str) -> list[str]:
+    with _db_lock:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                "SELECT date FROM non_working_days WHERE date >= ? AND date <= ? "
+                "ORDER BY date",
+                (d_from, d_to),
+            ).fetchall()
+            return [r["date"] for r in rows]
+        finally:
+            conn.close()
+
+
+# ── Insights engine (Phase 11) ────────────────────────────────────────────
+
+def compute_insights(
+    rows: list[dict],
+    non_working_days: list[str],
+    daily_target_sec: int = 8 * 3600,
+    daily_min_sec: int = 4 * 3600,
+) -> dict:
+    """Pure function: compute missing-days / under-target / low-hours from
+    stored worklog rows and a set of non-working dates.
+
+    Returns a dict with: total_seconds, target_seconds, working_days,
+    below_target, gap_seconds, missing_days, low_days, per_day, warned_days.
+    """
+    from datetime import date as _date, timedelta as _td
+
+    if not rows:
+        return {
+            "total_seconds": 0, "target_seconds": 0, "working_days": 0,
+            "below_target": False, "gap_seconds": 0,
+            "missing_days": [], "low_days": [], "per_day": {},
+            "warned_days": [],
+        }
+
+    nwd = set(non_working_days)
+    by_date: dict[str, int] = {}
+    for w in rows:
+        d = (w.get("date") or "")[:10]
+        if not d:
+            continue
+        by_date[d] = by_date.get(d, 0) + int(w.get("time_spent_seconds") or 0)
+
+    week_start = rows[0].get("week_start", "")
+    if not week_start:
+        return {
+            "total_seconds": sum(by_date.values()), "target_seconds": 0,
+            "working_days": 0, "below_target": False, "gap_seconds": 0,
+            "missing_days": [], "low_days": [], "per_day": by_date,
+            "warned_days": [],
+        }
+
+    try:
+        monday = _date.fromisoformat(week_start)
+    except ValueError:
+        return {
+            "total_seconds": sum(by_date.values()), "target_seconds": 0,
+            "working_days": 0, "below_target": False, "gap_seconds": 0,
+            "missing_days": [], "low_days": [], "per_day": by_date,
+            "warned_days": [],
+        }
+    week_dates = [monday + _td(days=i) for i in range(7)]
+    working = [d for d in week_dates if d.weekday() < 5 and d.isoformat() not in nwd]
+    target = daily_target_sec * len(working)
+    total = sum(by_date.values())
+
+    missing_days: list[str] = []
+    low_days: list[str] = []
+    warned_days: list[str] = []
+    for d in working:
+        ds = d.isoformat()
+        secs = by_date.get(ds, 0)
+        if secs == 0:
+            missing_days.append(ds)
+        elif secs < daily_min_sec:
+            low_days.append(ds)
+    # Days marked non-working that have logged hours → warn
+    for nd in nwd:
+        if nd in by_date:
+            warned_days.append(nd)
+
+    return {
+        "total_seconds": total,
+        "target_seconds": target,
+        "working_days": len(working),
+        "below_target": total < target,
+        "gap_seconds": max(0, target - total),
+        "missing_days": missing_days,
+        "low_days": low_days,
+        "per_day": {d.isoformat(): by_date.get(d.isoformat(), 0) for d in working},
+        "warned_days": warned_days,
+    }

@@ -126,6 +126,8 @@ class JiraConfigReq(BaseModel):
     tickets_folder: Optional[str] = None
     teammates: Optional[list] = None   # list of {accountId, displayName}
     cache_ttl_minutes: Optional[int] = None
+    daily_target_hours: Optional[int] = None
+    daily_min_hours: Optional[int] = None
 
 class TeammatesReq(BaseModel):
     teammates: list
@@ -345,6 +347,28 @@ async def _invalidate_for_write(date_str: str = None, worklog_id: str = None):
             print(f"[Jira] invalidation failed: {e}")
 
 
+async def _resolve_user(account_id: str = "") -> tuple[str, str, bool]:
+    """Resolve (account_id, display_name, is_me) for a given or current user."""
+    me_r = await asyncio.to_thread(_api, "get", "myself")
+    if not account_id:
+        if not me_r.ok:
+            raise HTTPException(me_r.status_code, "Cannot fetch current user")
+        me = me_r.json()
+        return me["accountId"], me.get("displayName", "Me"), True
+    c = config.load_jira_config()
+    found = next((t for t in c.get("teammates", []) if t.get("accountId") == account_id), None)
+    t_name = found.get("displayName", "Teammate") if found else "Teammate"
+    if me_r.ok and me_r.json().get("accountId") == account_id:
+        return account_id, me_r.json().get("displayName", t_name), True
+    return account_id, t_name, False
+
+
+def _daily_target_sec() -> int:
+    """Return the configured daily target in seconds (default 8h)."""
+    c = config.load_jira_config()
+    return int(c.get("daily_target_hours", 8)) * 3600
+
+
 class JiraTrackerPlugin(ToolkitPlugin):
     id = "jira"
     name = "Jira Tracker"
@@ -375,6 +399,8 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "tickets_folder": c.get("tickets_folder", ""),
                 "teammates": c.get("teammates", []),
                 "cache_ttl_minutes": int(c.get("cache_ttl_minutes", 5)),
+                "daily_target_hours": int(c.get("daily_target_hours", 8)),
+                "daily_min_hours": int(c.get("daily_min_hours", 4)),
             }
 
         @app.put("/api/jira/config")
@@ -391,6 +417,10 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 c["teammates"] = req.teammates
             if req.cache_ttl_minutes is not None:
                 c["cache_ttl_minutes"] = req.cache_ttl_minutes
+            if req.daily_target_hours is not None:
+                c["daily_target_hours"] = req.daily_target_hours
+            if req.daily_min_hours is not None:
+                c["daily_min_hours"] = req.daily_min_hours
             config.save_jira_config(c)
             if req.url:
                 config.save({"jira_base_url": req.url})
@@ -682,6 +712,62 @@ class JiraTrackerPlugin(ToolkitPlugin):
         @app.post("/api/jira/cache/clear")
         async def jira_cache_clear():
             _cache_clear()
+            return {"ok": True}
+
+        # ── Insights (Phase 11) ─────────────────────────────────
+
+        @app.get("/api/jira/insights/summary")
+        async def jira_insights_summary(week_of: str = "", account_id: str = ""):
+            """Return a lightweight gap count for the nav badge."""
+            d_from, d_to = _week_range(week_of)
+            t_id, t_name, is_me = await _resolve_user(account_id)
+            rows, _, _ = await _load_weekly(t_id, d_from, d_to, t_name)
+            nwd = set(jira_store.get_non_working_days_in_range(d_from, d_to))
+            daily = _daily_target_sec()
+
+            from app.plugins import jira_store as js
+            ins = js.compute_insights(rows, list(nwd), daily_target_sec=daily)
+
+            gap_count = len(ins["missing_days"]) + (1 if ins["below_target"] else 0)
+            return {"gap_count": gap_count, "below_target": ins["below_target"],
+                    "missing_days": len(ins["missing_days"]),
+                    "gap_seconds": ins["gap_seconds"]}
+
+        @app.get("/api/jira/insights")
+        async def jira_insights(week_of: str = "", account_id: str = ""):
+            """Full insights for a week (missing days, target bar, per-day)."""
+            d_from, d_to = _week_range(week_of)
+            t_id, t_name, is_me = await _resolve_user(account_id)
+            rows, _, _ = await _load_weekly(t_id, d_from, d_to, t_name)
+            nwd = set(jira_store.get_non_working_days_in_range(d_from, d_to))
+            daily = _daily_target_sec()
+
+            ins = jira_store.compute_insights(rows, list(nwd), daily_target_sec=daily)
+            return {
+                "monday": d_from, "sunday": d_to,
+                "account_id": t_id, "display_name": t_name, "is_me": is_me,
+                **ins,
+            }
+
+        # ── Meeting shortcut ────────────────────────────────────
+
+        # ── Non-working days (Phase 11) ─────────────────────────
+        @app.get("/api/jira/non-working-days")
+        async def jira_nwd_get():
+            return jira_store.get_non_working_days()
+
+        @app.post("/api/jira/non-working-days")
+        async def jira_nwd_add(req: dict):
+            d = (req or {}).get("date", "")
+            reason = (req or {}).get("reason", "")
+            if not d:
+                raise HTTPException(400, "date required")
+            jira_store.add_non_working_day(d, reason)
+            return {"ok": True}
+
+        @app.delete("/api/jira/non-working-days/{date}")
+        async def jira_nwd_remove(date: str):
+            jira_store.remove_non_working_day(date)
             return {"ok": True}
 
         # ── Meeting shortcut ────────────────────────────────────

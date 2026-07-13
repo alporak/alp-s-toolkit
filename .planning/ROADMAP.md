@@ -42,7 +42,7 @@
 - [x] Phase 8: SQLite Persistence Foundation — local store survives restarts, event-loop refactor, timezone-correct dates
 - [x] Phase 9: Read-Through Cache Integration — TTL + stale-serve, scoped invalidation
 - [x] Phase 10: Frontend Seamless Tab Redesign — persistent sidebar, shared store, no re-fetch on switch
-- [ ] Phase 11: Insights Engine — ghost-day / under-target / non-working-day logic + Insights tab UI
+- [x] Phase 11: Insights Engine — ghost-day / under-target / non-working-day logic + Insights tab UI
 - [ ] Phase 12: Notifications + Badge — nav/tab badges, toggleable transition-only browser notifs
 - [ ] Phase 13: Gap-Fill Tools + TeltoHeart Timesheet — quick-fill actions + side-project tracker
 
@@ -64,7 +64,7 @@
 | 8. SQLite Persistence Foundation | M4 | 1/1 | Complete | 2026-07-13 |
 | 9. Read-Through Cache Integration | M4 | 1/1 | Complete | 2026-07-13 |
 | 10. Frontend Seamless Tab Redesign | M4 | 1/1 | Complete | 2026-07-13 |
-| 11. Insights Engine | M4 | 0/0 | Not started | — |
+| 11. Insights Engine | M4 | 1/1 | Complete | 2026-07-13 |
 | 12. Notifications + Badge | M4 | 0/0 | Not started | — |
 | 13. Gap-Fill Tools + TeltoHeart Timesheet | M4 | 0/0 | Not started | — |
 

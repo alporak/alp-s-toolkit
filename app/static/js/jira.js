@@ -566,15 +566,19 @@ registerPlugin({
         h("div", { className: "form-row" },
           h("div", { className: "form-group", style: { flex: "0 0 160px" } },
             h("label", null, "Meeting Ticket"), h("input", { id: "j-mtg", className: "form-control", value: cfg.meeting_ticket || "" })),
-          h("div", { className: "form-group", style: { flex: "0 0 120px" } },
-            h("label", null, "Cache TTL (min)"), h("input", { id: "j-cache-ttl", className: "form-control", type: "number", min: "1", max: "60", value: String(cfg.cache_ttl_minutes || 5) })),
+          h("div", { className: "form-group", style: { flex: "0 0 100px" } },
+            h("label", null, "Cache TTL"), h("input", { id: "j-cache-ttl", className: "form-control", type: "number", min: "1", max: "60", value: String(cfg.cache_ttl_minutes || 5) })),
+          h("div", { className: "form-group", style: { flex: "0 0 80px" } },
+            h("label", null, "Target h/d"), h("input", { id: "j-daily-target", className: "form-control", type: "number", min: "1", max: "24", value: String(cfg.daily_target_hours || 8) })),
+          h("div", { className: "form-group", style: { flex: "0 0 80px" } },
+            h("label", null, "Min h/d"), h("input", { id: "j-daily-min", className: "form-control", type: "number", min: "1", max: "24", value: String(cfg.daily_min_hours || 4) })),
           h("div", { className: "form-group", style: { flex: "1" } },
             h("label", null, "Tickets Folder"), h("input", { id: "j-tickets-folder", className: "form-control", value: cfg.tickets_folder || "", placeholder: "C:\\path\\to\\_tickets" })),
         ),
         h("div", { className: "btn-group" },
           h("button", { className: "btn btn-primary", onclick: async () => {
             try {
-              const upd = { url: ($("#j-url")?.value || "").trim(), email: ($("#j-email")?.value || "").trim(), api_token: ($("#j-token")?.value || "").trim(), meeting_ticket: ($("#j-mtg")?.value || "").trim(), cache_ttl_minutes: parseInt($("#j-cache-ttl")?.value) || 5, tickets_folder: ($("#j-tickets-folder")?.value || "").trim() };
+              const upd = { url: ($("#j-url")?.value || "").trim(), email: ($("#j-email")?.value || "").trim(), api_token: ($("#j-token")?.value || "").trim(), meeting_ticket: ($("#j-mtg")?.value || "").trim(), cache_ttl_minutes: parseInt($("#j-cache-ttl")?.value) || 5, daily_target_hours: parseInt($("#j-daily-target")?.value) || 8, daily_min_hours: parseInt($("#j-daily-min")?.value) || 4, tickets_folder: ($("#j-tickets-folder")?.value || "").trim() };
               await api("/api/jira/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(upd) });
               this._cfg = null; this._dirty.wk = this._dirty.asg = true; this._startAutoRefresh();
               toast("Configuration saved", "success");
@@ -644,18 +648,161 @@ registerPlugin({
   },
 
   /* ================================================================
-     INSIGHTS PANEL  (placeholder — Phase 11 fills this in)
+     INSIGHTS PANEL  (Phase 11: ghost-days, under-target, history, nwd)
      ================================================================ */
+  _insWeekOffset: 0,
+
   _buildInsightsPanel() {
     const panel = h("div", { className: "jira-panel", "data-panel": "ins" });
-    panel.appendChild(h("div", { className: "empty" },
-      h("p", { className: "text-dim" }, "Insights coming in Phase 11")));
+    const nav = h("div", { className: "wk-toolbar" },
+      h("div", { className: "wk-toolbar-left" },
+        h("button", { className: "wk-nav-btn", onclick: () => { this._insWeekOffset--; this._dirty.ins = true; this._showPanel("ins"); } }, "\u2039"),
+        h("span", { className: "wk-week-label", id: "ins-week-label" }),
+        h("button", { className: "wk-nav-btn", onclick: () => { this._insWeekOffset++; this._dirty.ins = true; this._showPanel("ins"); } }, "\u203A"),
+        h("button", { className: "wk-nav-btn wk-today-btn", onclick: () => { this._insWeekOffset = 0; this._dirty.ins = true; this._showPanel("ins"); } }, "Today"),
+      ),
+    );
+    panel.appendChild(nav);
+    panel.appendChild(h("div", { className: "ins-content" }));
     return panel;
   },
 
-  _refreshInsights() {
-    // Phase 11 replaces this with real insight rendering.
-    this._dirty.ins = false;
+  async _refreshInsights() {
+    const panel = document.querySelector(`.jira-panel[data-panel="ins"]`);
+    if (!panel) return;
+    const content = panel.querySelector(".ins-content");
+    const label = panel.querySelector("#ins-week-label");
+    const cfg = await this._ensureCfg();
+    if (!cfg?.has_token) { content.innerHTML = '<div class="empty"><p>Configure Jira credentials in the Config tab first</p></div>'; return; }
+
+    const monday = mondayOf(addDays(new Date(), this._insWeekOffset * 7));
+    const sunday = addDays(monday, 6);
+    const weekOf = isoDate(monday);
+    label.textContent = `${weekOf}  \u2192  ${isoDate(sunday)}`;
+    content.innerHTML = '<div class="loading-state"><div class="spinner"></div></div>';
+
+    try {
+      const ins = await api(`/api/jira/insights?week_of=${weekOf}`);
+      const nwd = await api("/api/jira/non-working-days");
+      content.innerHTML = "";
+
+      // Summary bar
+      const pct = ins.target_seconds > 0 ? Math.min(100, Math.round(ins.total_seconds / ins.target_seconds * 100)) : 0;
+      content.appendChild(h("div", { className: "ins-summary" },
+        h("div", { className: "ins-bar" },
+          h("div", { className: "ins-bar-fill" + (pct >= 100 ? " ins-ok" : " ins-warn"), style: { width: pct + "%" } }),
+          h("span", { className: "ins-bar-label" }, `${fmtSec(ins.total_seconds)} / ${fmtSec(ins.target_seconds)} (${ins.working_days}d)`),
+        ),
+        ins.below_target
+          ? h("p", { className: "ins-gap" }, `\u26A0 ${fmtSec(ins.gap_seconds)} below target`)
+          : h("p", { className: "ins-ontarget" }, "\u2713 On target"),
+      ));
+
+      // Missing days
+      if (ins.missing_days.length) {
+        content.appendChild(h("h3", { className: "ins-hdr" }, `Missing (${ins.missing_days.length})`));
+        const grid = h("div", { className: "ins-day-grid" });
+        for (const d of ins.missing_days) {
+          const date = new Date(d + "T00:00:00");
+          const label = DAY_NAMES[(date.getDay() + 6) % 7] + " " + d.slice(5);
+          grid.appendChild(h("button", { className: "ins-tag ins-tag-miss",
+            title: `Click for per-day context`, onclick: () => {
+              const div = h("div", { className: "ins-drill" },
+                h("p", null, label + " — 0h (missing)"),
+                ...Object.entries(ins.per_day || {}).map(([dd, ss]) =>
+                  h("div", { className: ss === 0 ? "text-error" : "" },
+                    DAY_NAMES[(new Date(dd + "T00:00:00").getDay() + 6) % 7] + " " + dd.slice(5) + ": " + fmtSec(ss)))
+              );
+              const existing = grid.nextElementSibling;
+              if (existing?.classList.contains("ins-drill")) existing.remove();
+              div.onclick = () => div.remove();
+              grid.after(div);
+            } }, label));
+        }
+        content.appendChild(grid);
+      }
+
+      // Low hours
+      if (ins.low_days.length) {
+        content.appendChild(h("h3", { className: "ins-hdr" }, `Low hours (${ins.low_days.length})`));
+        const grid = h("div", { className: "ins-day-grid" });
+        for (const d of ins.low_days) {
+          const date = new Date(d + "T00:00:00");
+          const label = DAY_NAMES[(date.getDay() + 6) % 7] + " " + d.slice(5) + " (" + fmtSec(ins.per_day[d] || 0) + ")";
+          grid.appendChild(h("span", { className: "ins-tag ins-tag-low" }, label));
+        }
+        content.appendChild(grid);
+      }
+
+      // Warned days (marked off with hours)
+      if (ins.warned_days.length) {
+        content.appendChild(h("h3", { className: "ins-hdr" }, "\u26A0 Marked-off days with hours"));
+        const grid = h("div", { className: "ins-day-grid" });
+        for (const d of ins.warned_days) {
+          const label = d.slice(5) + " (" + fmtSec(ins.per_day[d] || 0) + ")";
+          grid.appendChild(h("span", { className: "ins-tag ins-tag-warn" }, label));
+        }
+        content.appendChild(grid);
+      }
+
+      // Historical trend (last 4 weeks)
+      await this._renderTrend(content, monday, cfg);
+
+      // Non-working day manager
+      await this._renderNWD(content, nwd);
+
+      this._dirty.ins = false;
+    } catch (e) {
+      console.error("[Jira] Insights failed:", e.message);
+      content.innerHTML = `<div class="empty"><p>Failed: ${e.message}</p></div>`;
+    }
+  },
+
+  async _renderTrend(container, currentMonday, cfg) {
+    const section = h("div", { className: "ins-trend" });
+    section.appendChild(h("h3", { className: "ins-hdr" }, "Trend (4 weeks)"));
+    const row = h("div", { className: "ins-trend-row" });
+    for (let i = 3; i >= 0; i--) {
+      const w = isoDate(addDays(currentMonday, -i * 7));
+      try {
+        const s = await api(`/api/jira/insights/summary?week_of=${w}`);
+        const pct = s.gap_seconds === 0 && !s.below_target ? 100
+          : Math.min(100, Math.round((s.gap_seconds || 0) / (cfg.daily_target_hours * 3600 * 5) * 100));
+        row.appendChild(h("div", { className: "ins-trend-bar-wrap" },
+          h("div", { className: "ins-trend-bar", style: { height: pct + "%" },
+            title: `${w.slice(5)}: gap ${fmtSec(s.gap_seconds || 0)}` }),
+        ));
+      } catch (_) {}
+    }
+    section.appendChild(row);
+    container.appendChild(section);
+  },
+
+  async _renderNWD(container, nwd) {
+    const section = h("div", { className: "ins-nwd" });
+    section.appendChild(h("h3", { className: "ins-hdr" }, "Non-working days"));
+    const grid = h("div", { className: "ins-day-grid" });
+    for (const d of nwd) {
+      grid.appendChild(h("span", { className: "ins-tag ins-tag-off" },
+        d, h("button", { className: "ins-nwd-del", title: "Remove",
+          onclick: async () => {
+            try { await api(`/api/jira/non-working-days/${d}`, { method: "DELETE" }); this._dirty.ins = true; this._showPanel("ins"); }
+            catch (e) { toast("Remove failed", "error"); }
+          } }, "\u00d7"),
+      ));
+    }
+    section.appendChild(grid);
+    const addForm = h("div", { className: "form-row", style: { marginTop: "var(--sp-2)" } },
+      h("input", { id: "nwd-date", className: "form-control", type: "date", style: { flex: "1" } }),
+      h("button", { className: "btn btn-sm btn-primary", onclick: async () => {
+        const d = ($("#nwd-date")?.value || "").trim();
+        if (!d) return;
+        try { await api("/api/jira/non-working-days", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: d }) }); this._dirty.ins = true; this._showPanel("ins"); }
+        catch (e) { toast("Add failed", "error"); }
+      } }, "Mark"),
+    );
+    section.appendChild(addForm);
+    container.appendChild(section);
   },
 
   /* ================================================================
