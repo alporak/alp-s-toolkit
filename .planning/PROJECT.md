@@ -22,9 +22,20 @@ Internal developer tooling — Jira analytics dashboards, documentation search a
 - Phase 7: Frontend SPA — search-as-you-type, formatted HTML preview, file-type filters, keyboard nav, sync progress bar, repo settings UI, native "Open file" via os.startfile()
 - **Artifacts**: `app/plugins/doc_extraction.py` (484 lines), `app/plugins/doc_search.py` (926 lines), `app/static/js/doc_search.js` (1106 lines), `tests/test_doc_extraction.py` (280 lines)
 
-## Current State (post-M3)
+## Current Milestone: M4 — Jira Tracker Rework
 
-Shipped M3 with ~2,800 lines of new code across 4 files. Working plugin serving ~1,100 indexed documents across 3 repos. Next milestone TBD.
+**Goal:** Make the Jira Tracker instant and insight-rich — SQLite-backed local persistence, a redesigned tabbed UI with a persistent sidebar and pinned insights (seamless transitions, no re-fetch on tab switch), in-app + browser notifications, and power-user tools for spotting missed hours and under-target weeks.
+
+**Target features:**
+- **Local persistence** — Replace the per-process in-memory worklog cache with a SQLite store (per-plugin DB, WAL) that survives restarts, with smart refresh / TTL / force-refresh.
+- **UI redesign** — Persistent sidebar, tab state kept alive (no API call on every tab open), instant transitions, a shared in-memory store across tabs.
+- **Notifications** — New Insights tab + toggleable browser notifications + tab-bar badge when gaps (missed days / short weeks) are detected.
+- **Insights engine** — Detect days with no/missing hours and weeks below target; 40h default weekly target with configurable non-working-day marking that recalculates the target (e.g. 40h → 32h for a 4-day week / holidays).
+- **Gap-fill tools** — Quick actions to log hours for missed days and top up short weeks.
+
+## Current State (post-M3, starting M4)
+
+Shipped M3 with ~2,800 lines of new code across 4 files. Working plugin serving ~1,100 indexed documents across 3 repos. Jira Tracker plugin (M1-era) is functional but has known friction: per-process in-memory cache lost on restart, every tab open triggers a full re-render + Jira API calls, and no insight into missed/under-target logging. M4 reworks it.
 
 ## Tech Stack
 - **Backend**: FastAPI plugin (ToolkitPlugin base class)

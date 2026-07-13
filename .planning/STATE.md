@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: M3
-milestone_name: Documentation Search Engine
-status: Awaiting next milestone
-last_updated: "2026-07-02T06:44:44.153Z"
-last_activity: 2026-07-02 — Milestone M3 completed and archived
+milestone: M4
+milestone_name: Jira Tracker Rework
+status: planning
+last_updated: "2026-07-13T11:09:28.344Z"
+last_activity: 2026-07-13
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 5
-  completed_plans: 5
-  percent: 100
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -66,10 +66,10 @@ A FastAPI plugin for full-text search across 3 internal documentation repos (~30
 
 ## Current Position
 
-Phase: Milestone M3 complete
+Phase: Not started (defining requirements)
 Plan: —
-Status: Awaiting next milestone
-Last activity: 2026-07-02 — Milestone M3 completed and archived
+Status: Defining requirements
+Last activity: 2026-07-13 — Milestone M4 started
 
 ## Accumulated Context
 
