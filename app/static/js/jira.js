@@ -124,7 +124,31 @@ registerPlugin({
     if (key.includes(":weekly") || key.includes(":insights")) this._dirty.wk = true;
     if (key.includes(":assigned")) this._dirty.asg = true;
     if (key.includes(":config")) this._dirty.cfg = true;
-    setPluginBadge("jira", 0);  // TODO Phase 12: wire gap count
+    this._updateBadge();
+  },
+
+  async _updateBadge() {
+    try {
+      const today = isoDate(mondayOf(new Date()));
+      const s = await api(`/api/jira/insights/summary?week_of=${today}`);
+      const gapCount = (s.missing_days || 0) + (s.below_target ? 1 : 0);
+      setPluginBadge("jira", gapCount);
+      // Browser notification (Phase 12)
+      if (gapCount > 0 && this._cfg?.notifications_enabled) {
+        this._maybeNotify(gapCount, s);
+      }
+    } catch (_) { setPluginBadge("jira", 0); }
+  },
+
+  _maybeNotify(gapCount, summary) {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (document.visibilityState === "visible") return;
+    try {
+      const msg = summary.missing_days > 0
+        ? `${summary.missing_days} day(s) missing hours`
+        : "Week below target";
+      new Notification(`Jira: ${msg}`, { body: `Gap: ${fmtSec(summary.gap_seconds || 0)}` });
+    } catch (_) {}
   },
 
   _refreshActivePanel() {
@@ -575,10 +599,16 @@ registerPlugin({
           h("div", { className: "form-group", style: { flex: "1" } },
             h("label", null, "Tickets Folder"), h("input", { id: "j-tickets-folder", className: "form-control", value: cfg.tickets_folder || "", placeholder: "C:\\path\\to\\_tickets" })),
         ),
+        h("div", { className: "form-row", style: { alignItems: "center", gap: "var(--sp-3)" } },
+          h("label", { className: "form-check" },
+            h("input", { id: "j-notif", type: "checkbox", checked: cfg.notifications_enabled,
+              onchange: () => { const cb = $("#j-notif"); if (cb?.checked) { try { Notification.requestPermission(); } catch (_) {} } } }),
+            " Enable browser notifications"),
+        ),
         h("div", { className: "btn-group" },
           h("button", { className: "btn btn-primary", onclick: async () => {
             try {
-              const upd = { url: ($("#j-url")?.value || "").trim(), email: ($("#j-email")?.value || "").trim(), api_token: ($("#j-token")?.value || "").trim(), meeting_ticket: ($("#j-mtg")?.value || "").trim(), cache_ttl_minutes: parseInt($("#j-cache-ttl")?.value) || 5, daily_target_hours: parseInt($("#j-daily-target")?.value) || 8, daily_min_hours: parseInt($("#j-daily-min")?.value) || 4, tickets_folder: ($("#j-tickets-folder")?.value || "").trim() };
+              const upd = { url: ($("#j-url")?.value || "").trim(), email: ($("#j-email")?.value || "").trim(), api_token: ($("#j-token")?.value || "").trim(), meeting_ticket: ($("#j-mtg")?.value || "").trim(), cache_ttl_minutes: parseInt($("#j-cache-ttl")?.value) || 5, daily_target_hours: parseInt($("#j-daily-target")?.value) || 8, daily_min_hours: parseInt($("#j-daily-min")?.value) || 4, notifications_enabled: ($("#j-notif")?.checked) || false, tickets_folder: ($("#j-tickets-folder")?.value || "").trim() };
               await api("/api/jira/config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(upd) });
               this._cfg = null; this._dirty.wk = this._dirty.asg = true; this._startAutoRefresh();
               toast("Configuration saved", "success");
@@ -694,7 +724,11 @@ registerPlugin({
           h("span", { className: "ins-bar-label" }, `${fmtSec(ins.total_seconds)} / ${fmtSec(ins.target_seconds)} (${ins.working_days}d)`),
         ),
         ins.below_target
-          ? h("p", { className: "ins-gap" }, `\u26A0 ${fmtSec(ins.gap_seconds)} below target`)
+          ? h("p", { className: "ins-gap" },
+              `\u26A0 ${fmtSec(ins.gap_seconds)} below target`,
+              h("br"), h("button", { className: "btn btn-sm btn-primary", style: { marginTop: "4px" },
+                onclick: () => this._topUpWeek(ins.gap_seconds, cfg) },
+                `Log ${fmtSec(ins.gap_seconds)} to meeting`))
           : h("p", { className: "ins-ontarget" }, "\u2713 On target"),
       ));
 
@@ -709,6 +743,9 @@ registerPlugin({
             title: `Click for per-day context`, onclick: () => {
               const div = h("div", { className: "ins-drill" },
                 h("p", null, label + " — 0h (missing)"),
+                h("button", { className: "btn btn-sm btn-primary", style: { marginBottom: "4px" },
+                  onclick: (ev) => { ev.stopPropagation(); this._fillMissedDay(d, cfg); } },
+                  "Log 8h to meeting"),
                 ...Object.entries(ins.per_day || {}).map(([dd, ss]) =>
                   h("div", { className: ss === 0 ? "text-error" : "" },
                     DAY_NAMES[(new Date(dd + "T00:00:00").getDay() + 6) % 7] + " " + dd.slice(5) + ": " + fmtSec(ss)))
@@ -750,6 +787,9 @@ registerPlugin({
 
       // Non-working day manager
       await this._renderNWD(content, nwd);
+
+      // TeltoHeart side-project section
+      await this._renderTeltoHeart(content, weekOf);
 
       this._dirty.ins = false;
     } catch (e) {
@@ -834,5 +874,81 @@ registerPlugin({
       if ($("#mt-cmt")) $("#mt-cmt").value = "";
       this._dirty.wk = true;
     } catch (e) { console.error("[Jira] Log meeting failed:", e.message); }
+  },
+
+  async _fillMissedDay(date, cfg) {
+    try {
+      await api("/api/jira/meeting", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ time_spent: "8h", started: date, issue_key: cfg.meeting_ticket || "" }) });
+      toast(`Filled 8h for ${date}`, "success");
+      this._dirty.wk = this._dirty.ins = true;
+      this._showPanel("ins");
+    } catch (e) { toast("Fill failed: " + e.message, "error"); }
+  },
+
+  async _topUpWeek(gapSeconds, cfg) {
+    const hrs = Math.max(1, Math.ceil(gapSeconds / 3600));
+    try {
+      await api("/api/jira/meeting", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ time_spent: hrs + "h", issue_key: cfg.meeting_ticket || "" }) });
+      toast(`Topped up ${hrs}h`, "success");
+      this._dirty.wk = this._dirty.ins = true;
+      this._showPanel("ins");
+    } catch (e) { toast("Top-up failed: " + e.message, "error"); }
+  },
+
+  async _renderTeltoHeart(container, weekOf) {
+    const section = h("div", { className: "ins-telto" });
+    section.appendChild(h("h3", { className: "ins-hdr" }, "TeltoHeart"));
+    try {
+      const tickets = await api("/api/jira/teltoheart/tickets");
+      const ts = await api(`/api/jira/teltoheart/timesheet?week_of=${weekOf}`);
+
+      // Mark/unmark
+      const markForm = h("div", { className: "form-row", style: { marginBottom: "var(--sp-2)", gap: "var(--sp-1)" } },
+        h("input", { id: "telto-key", className: "form-control", placeholder: "Ticket key (e.g. FMBP-12345)", style: { flex: "1", fontSize: "0.82rem" } }),
+        h("button", { className: "btn btn-sm btn-primary", onclick: async () => {
+          const k = ($("#telto-key")?.value || "").trim().toUpperCase();
+          if (!k) return;
+          try {
+            await api("/api/jira/teltoheart/tickets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ issue_key: k }) });
+            toast(`Marked ${k}`, "success");
+            this._dirty.ins = true; this._showPanel("ins");
+          } catch (e) { toast("Failed", "error"); }
+        } }, "Mark ticket"),
+      );
+      section.appendChild(markForm);
+
+      // List
+      if (tickets.length) {
+        const grid = h("div", { className: "ins-day-grid" });
+        for (const k of tickets) {
+          grid.appendChild(h("span", { className: "ins-tag ins-tag-off" }, k,
+            h("button", { className: "ins-nwd-del", title: "Remove",
+              onclick: async () => {
+                try { await api(`/api/jira/teltoheart/tickets/${k}`, { method: "DELETE" }); this._dirty.ins = true; this._showPanel("ins"); }
+                catch (e) { toast("Remove failed", "error"); }
+              } }, "\u00d7"),
+          ));
+        }
+        section.appendChild(grid);
+      }
+
+      // Timesheet
+      if (ts.hours && ts.hours.length) {
+        section.appendChild(h("h4", { style: { margin: "var(--sp-2) 0 var(--sp-1)", fontSize: "0.85rem" } }, "Timesheet"));
+        const tbl = h("table", { className: "wk-tbl", style: { marginTop: 0 } });
+        tbl.appendChild(h("thead", h("tr", null,
+          h("th", null, "Account"), h("th", null, "Hours"))));
+        const tbody = h("tbody");
+        for (const hh of ts.hours) {
+          tbody.appendChild(h("tr", null,
+            h("td", null, hh.account_id), h("td", { style: { textAlign: "right" } }, fmtSec(hh.total_seconds))));
+        }
+        tbl.appendChild(tbody);
+        section.appendChild(tbl);
+      }
+    } catch (e) { console.error("[Jira] TeltoHeart failed:", e.message); }
+    container.appendChild(section);
   },
 });

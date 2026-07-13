@@ -128,6 +128,7 @@ class JiraConfigReq(BaseModel):
     cache_ttl_minutes: Optional[int] = None
     daily_target_hours: Optional[int] = None
     daily_min_hours: Optional[int] = None
+    notifications_enabled: Optional[bool] = None
 
 class TeammatesReq(BaseModel):
     teammates: list
@@ -401,6 +402,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "cache_ttl_minutes": int(c.get("cache_ttl_minutes", 5)),
                 "daily_target_hours": int(c.get("daily_target_hours", 8)),
                 "daily_min_hours": int(c.get("daily_min_hours", 4)),
+                "notifications_enabled": bool(c.get("notifications_enabled", False)),
             }
 
         @app.put("/api/jira/config")
@@ -421,6 +423,8 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 c["daily_target_hours"] = req.daily_target_hours
             if req.daily_min_hours is not None:
                 c["daily_min_hours"] = req.daily_min_hours
+            if req.notifications_enabled is not None:
+                c["notifications_enabled"] = req.notifications_enabled
             config.save_jira_config(c)
             if req.url:
                 config.save({"jira_base_url": req.url})
@@ -769,6 +773,30 @@ class JiraTrackerPlugin(ToolkitPlugin):
         async def jira_nwd_remove(date: str):
             jira_store.remove_non_working_day(date)
             return {"ok": True}
+
+        # ── TeltoHeart (Phase 13) ────────────────────────────────
+        @app.get("/api/jira/teltoheart/tickets")
+        async def jira_teltoheart_tickets():
+            return jira_store.get_teltoheart_tickets()
+
+        @app.post("/api/jira/teltoheart/tickets")
+        async def jira_teltoheart_mark(req: dict):
+            key = (req or {}).get("issue_key", "")
+            if not key:
+                raise HTTPException(400, "issue_key required")
+            jira_store.mark_teltoheart_ticket(key)
+            return {"ok": True}
+
+        @app.delete("/api/jira/teltoheart/tickets/{issue_key}")
+        async def jira_teltoheart_unmark(issue_key: str):
+            jira_store.unmark_teltoheart_ticket(issue_key)
+            return {"ok": True}
+
+        @app.get("/api/jira/teltoheart/timesheet")
+        async def jira_teltoheart_timesheet(week_of: str = ""):
+            d_from, d_to = _week_range(week_of)
+            hours = jira_store.get_teltoheart_hours(d_from, d_to)
+            return {"monday": d_from, "sunday": d_to, "hours": hours}
 
         # ── Meeting shortcut ────────────────────────────────────
 

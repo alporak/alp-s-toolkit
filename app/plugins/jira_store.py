@@ -146,6 +146,10 @@ def ensure_schema() -> None:
                     "  reason TEXT NOT NULL DEFAULT '')"
                 )
                 conn.execute(
+                    "CREATE TABLE IF NOT EXISTS teltoheart_tickets ("
+                    "  issue_key TEXT PRIMARY KEY)"
+                )
+                conn.execute(
                     "INSERT OR REPLACE INTO schema_meta (key, value) "
                     "VALUES ('version', ?)",
                     (SCHEMA_VERSION,),
@@ -215,6 +219,10 @@ def ensure_schema() -> None:
                     "CREATE TABLE IF NOT EXISTS non_working_days ("
                     "  date TEXT PRIMARY KEY,"
                     "  reason TEXT NOT NULL DEFAULT '')"
+                )
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS teltoheart_tickets ("
+                    "  issue_key TEXT PRIMARY KEY)"
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO schema_meta (key, value) "
@@ -453,6 +461,68 @@ def get_non_working_days_in_range(d_from: str, d_to: str) -> list[str]:
                 (d_from, d_to),
             ).fetchall()
             return [r["date"] for r in rows]
+        finally:
+            conn.close()
+
+
+# ── TeltoHeart side-project tickets (Phase 13) ───────────────────────
+
+def mark_teltoheart_ticket(issue_key: str) -> None:
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO teltoheart_tickets (issue_key) VALUES (?)",
+                (issue_key,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def unmark_teltoheart_ticket(issue_key: str) -> None:
+    with _db_lock:
+        conn = _get_db()
+        try:
+            conn.execute(
+                "DELETE FROM teltoheart_tickets WHERE issue_key=?",
+                (issue_key,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_teltoheart_tickets() -> list[str]:
+    with _db_lock:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                "SELECT issue_key FROM teltoheart_tickets ORDER BY issue_key"
+            ).fetchall()
+            return [r["issue_key"] for r in rows]
+        finally:
+            conn.close()
+
+
+def get_teltoheart_hours(d_from: str, d_to: str) -> list[dict]:
+    """Return per-account total seconds for worklogs on TeltoHeart tickets
+    in the given date range. Requires worklogs to have been cached first."""
+    tickets = get_teltoheart_tickets()
+    if not tickets:
+        return []
+    placeholders = ",".join("?" for _ in tickets)
+    with _db_lock:
+        conn = _get_db()
+        try:
+            rows = conn.execute(
+                f"SELECT account_id, SUM(time_spent_seconds) AS total_seconds "
+                f"FROM worklogs WHERE issue_key IN ({placeholders}) "
+                f"AND date >= ? AND date <= ? "
+                f"GROUP BY account_id",
+                tickets + [d_from, d_to],
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
