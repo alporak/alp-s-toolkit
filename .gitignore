@@ -4,6 +4,8 @@ toolkit_settings.json
 output/*
 .vscode/*
 app/plugins/*.db
+app/plugins/*.db-wal
+app/plugins/*.db-shm
 universal-tester-tool/generated/*
 universal-tester-tool/test_cases/*
 .project_dumper_config.json

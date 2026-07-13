@@ -5,9 +5,11 @@ Includes in-memory cache with configurable TTL.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sys
+import threading
 import time as _time
 from datetime import datetime, date, timedelta
 from typing import Optional, List
@@ -19,7 +21,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from app.plugins.base import ToolkitPlugin
+from app.plugins import jira_store
 from app import config
+
+# Serialize JIRA client creation (Pitfall 3 — client is not documented thread-safe).
+_jira_client: JIRA | None = None
+_jira_client_lock = threading.Lock()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DOMAIN = "teltonika-telematics.atlassian.net"
@@ -30,16 +37,18 @@ _jira_client: JIRA | None = None
 
 def _jira() -> JIRA:
     global _jira_client
-    if _jira_client is None:
-        c = config.load_jira_config()
-        _jira_client = JIRA(server=SERVER,
-                            basic_auth=(c.get("email", ""), c.get("token", "")))
-    return _jira_client
+    with _jira_client_lock:
+        if _jira_client is None:
+            c = config.load_jira_config()
+            _jira_client = JIRA(server=SERVER,
+                                basic_auth=(c.get("email", ""), c.get("token", "")))
+        return _jira_client
 
 
 def _reset_jira_client():
     global _jira_client
-    _jira_client = None
+    with _jira_client_lock:
+        _jira_client = None
 
 # ── In-memory cache ─────────────────────────────────────────────
 # key → { "data": ..., "ts": epoch }
@@ -198,12 +207,8 @@ def _build_comment(text: str) -> dict:
 def _fetch_worklogs_for_user(account_id: str, date_from: str, date_to: str,
                               display_name: str = "") -> tuple[list[dict], bool]:
     """Fetch all worklogs for a given user in a date range.
-    Returns (worklogs, from_cache)."""
-    ck = _cache_key(account_id, date_from, date_to)
-    cached = _cache_get(ck)
-    if cached is not None:
-        return cached["data"], True
-
+    Returns (worklogs, from_cache). The local SQLite store is populated by the
+    read-through layer (Phase 9); here we just fetch from Jira and mirror the result."""
     jql = (f"worklogAuthor = '{account_id}' "
            f"AND worklogDate >= '{date_from}' "
            f"AND worklogDate <= '{date_to}' "
@@ -243,7 +248,12 @@ def _fetch_worklogs_for_user(account_id: str, date_from: str, date_to: str,
             })
 
     result.sort(key=lambda x: x.get("started", ""), reverse=True)
-    _cache_put(ck, result)
+    # Persist the fetched mirror into the local SQLite store (PERS-01/02/06).
+    try:
+        jira_store.upsert_worklogs(account_id, result)
+        jira_store.set_cache_meta(account_id, date_from, complete=True)
+    except Exception as e:  # never let persistence failure break the read path
+        print(f"[Jira] store persist failed: {e}")
     return result, False
 
 
@@ -252,6 +262,13 @@ class JiraTrackerPlugin(ToolkitPlugin):
     name = "Jira Tracker"
     icon = "⏱️"
     order = 40
+
+    def startup(self):
+        """Create the local SQLite store on startup (PERS-01)."""
+        try:
+            jira_store.ensure_schema()
+        except Exception as e:
+            print(f"[Jira] store init failed: {e}")
 
     def register_routes(self, app: FastAPI):
 
@@ -296,7 +313,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
 
         @app.get("/api/jira/myself")
         async def jira_myself():
-            r = _api("get", "myself")
+            r = await asyncio.to_thread(_api, "get", "myself")
             if r.ok:
                 d = r.json()
                 return {
@@ -312,7 +329,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
         async def jira_user_search(query: str = ""):
             if not query or len(query) < 2:
                 return []
-            r = _api("get", "user/search", params={"query": query, "maxResults": 10})
+            r = await asyncio.to_thread(_api, "get", "user/search", params={"query": query, "maxResults": 10})
             if not r.ok:
                 raise HTTPException(r.status_code, r.text)
             return [
@@ -350,9 +367,10 @@ class JiraTrackerPlugin(ToolkitPlugin):
             jql = ("assignee=currentUser() AND statusCategory != Done "
                    "ORDER BY updated DESC")
             try:
-                raw = _jira().search_issues(
-                    jql, maxResults=50,
-                    fields="summary,status,priority,attachment")
+                raw = await asyncio.to_thread(
+                    lambda: _jira().search_issues(
+                        jql, maxResults=50,
+                        fields="summary,status,priority,attachment"))
             except JIRAError as e:
                 raise HTTPException(e.status_code or 500, str(e))
             issues = []
@@ -427,7 +445,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
 
             if not account_id:
                 # Fetch myself
-                me_r = _api("get", "myself")
+                me_r = await asyncio.to_thread(_api, "get", "myself")
                 if not me_r.ok:
                     raise HTTPException(me_r.status_code, "Cannot fetch current user")
                 me = me_r.json()
@@ -446,7 +464,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 is_me = False
                 
                 # Verify if it's actually me requested by ID
-                me_r = _api("get", "myself")
+                me_r = await asyncio.to_thread(_api, "get", "myself")
                 if me_r.ok and me_r.json().get("accountId") == account_id:
                     is_me = True
                     t_name = me_r.json().get("displayName")
@@ -454,7 +472,8 @@ class JiraTrackerPlugin(ToolkitPlugin):
             if force_refresh:
                 _cache_clear(t_id)
 
-            wl, was_cached = _fetch_worklogs_for_user(t_id, d_from, d_to, t_name)
+            wl, was_cached = await asyncio.to_thread(
+                _fetch_worklogs_for_user, t_id, d_from, d_to, t_name)
             
             users_data.append({
                 "accountId": t_id,
@@ -476,26 +495,28 @@ class JiraTrackerPlugin(ToolkitPlugin):
         @app.get("/api/jira/worklogs")
         async def jira_worklogs(issue_key: str = "", date_from: str = "", date_to: str = ""):
             if not issue_key:
-                me_r = _api("get", "myself")
+                me_r = await asyncio.to_thread(_api, "get", "myself")
                 if not me_r.ok:
                     raise HTTPException(me_r.status_code, "Cannot fetch current user")
                 me = me_r.json()
                 d_from = date_from or date.today().isoformat()
                 d_to = date_to or date.today().isoformat()
-                wl, _ = _fetch_worklogs_for_user(me["accountId"], d_from, d_to,
-                                                 me.get("displayName", ""))
+                wl, _ = await asyncio.to_thread(
+                    _fetch_worklogs_for_user, me["accountId"], d_from, d_to,
+                    me.get("displayName", ""))
                 return wl
 
-            r = _api("get", f"issue/{issue_key}/worklog")
+            r = await asyncio.to_thread(_api, "get", f"issue/{issue_key}/worklog")
             if not r.ok:
                 raise HTTPException(r.status_code, r.text)
             wl = r.json().get("worklogs", [])
-            me_r2 = _api("get", "myself")
+            me_r2 = await asyncio.to_thread(_api, "get", "myself")
             my_id = me_r2.json().get("accountId") if me_r2.ok else None
             if my_id:
                 wl = [w for w in wl if w.get("author", {}).get("accountId") == my_id]
 
-            issue_r = _api("get", f"issue/{issue_key}", params={"fields": "summary"})
+            issue_r = await asyncio.to_thread(
+                _api, "get", f"issue/{issue_key}", params={"fields": "summary"})
             issue_summary = ""
             if issue_r.ok:
                 issue_summary = issue_r.json().get("fields", {}).get("summary", "")
@@ -527,8 +548,9 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "started": started,
                 "comment": _build_comment(req.comment),
             }
-            r = _api("post", f"issue/{req.issue_key}/worklog",
-                      json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
+            r = await asyncio.to_thread(
+                _api, "post", f"issue/{req.issue_key}/worklog",
+                json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
                 _cache_clear()   # invalidate so next fetch gets fresh data
                 return {"ok": True, "id": r.json().get("id")}
@@ -547,8 +569,9 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "started": started,
                 "comment": _build_comment(req.comment),
             }
-            r = _api("put", f"issue/{issue_key}/worklog/{worklog_id}",
-                      json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
+            r = await asyncio.to_thread(
+                _api, "put", f"issue/{issue_key}/worklog/{worklog_id}",
+                json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
                 _cache_clear()  # invalidate
                 return {"ok": True, "id": r.json().get("id")}
@@ -558,8 +581,9 @@ class JiraTrackerPlugin(ToolkitPlugin):
 
         @app.delete("/api/jira/worklog/{issue_key}/{worklog_id}")
         async def jira_del_worklog(issue_key: str, worklog_id: str):
-            r = _api("delete", f"issue/{issue_key}/worklog/{worklog_id}",
-                      params={"adjustEstimate": "auto", "notifyUsers": "false"})
+            r = await asyncio.to_thread(
+                _api, "delete", f"issue/{issue_key}/worklog/{worklog_id}",
+                params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 204):
                 _cache_clear()   # invalidate
             return {"ok": r.status_code in (200, 204)}
@@ -588,8 +612,9 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "started": started,
                 "comment": _build_comment(req.summary or f"{date.today():%m.%d} standup"),
             }
-            r = _api("post", f"issue/{issue_key}/worklog",
-                      json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
+            r = await asyncio.to_thread(
+                _api, "post", f"issue/{issue_key}/worklog",
+                json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
                 return {"ok": True}
             raise HTTPException(r.status_code, r.text)
@@ -628,7 +653,8 @@ class JiraTrackerPlugin(ToolkitPlugin):
             if open_folder and sys.platform == "win32":
                 os.startfile(dest)
 
-            r = _api("get", f"issue/{key}", params={"fields": "attachment"})
+            r = await asyncio.to_thread(
+                _api, "get", f"issue/{key}", params={"fields": "attachment"})
             if not r.ok:
                 raise HTTPException(r.status_code, r.text)
             
