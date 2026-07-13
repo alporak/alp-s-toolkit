@@ -114,6 +114,7 @@ export function renderNav() {
       className: "nav-btn" + (activePlugin === p ? " active" : ""),
       onclick: () => switchPlugin(p),
     });
+    btn.dataset.pluginId = p.id;
     if (p.svgIcon) {
       const iconSpan = h("span", { className: "nav-icon", html: p.svgIcon });
       btn.appendChild(iconSpan);
@@ -121,6 +122,21 @@ export function renderNav() {
     btn.appendChild(document.createTextNode(p.name));
     nav.appendChild(btn);
   }
+}
+
+export function setPluginBadge(pluginId, count) {
+  const btn = $(`#nav .nav-btn[data-plugin-id="${pluginId}"]`);
+  if (!btn) return;
+  let badge = btn.querySelector(".nav-badge");
+  if (!count || count <= 0) {
+    if (badge) badge.remove();
+    return;
+  }
+  if (!badge) {
+    badge = h("span", { className: "nav-badge" });
+    btn.appendChild(badge);
+  }
+  badge.textContent = count > 99 ? "99+" : String(count);
 }
 
 function _resetMain() {

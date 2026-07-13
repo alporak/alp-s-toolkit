@@ -1976,3 +1976,55 @@ select.utt-input { cursor: pointer; }
   margin-bottom: 2px;
 }
 
+/* ── Jira Tracker v2 sidebar ─────────────────────────────────── */
+.jira-app { display: flex; min-height: 0; flex: 1; }
+.jira-sidebar {
+  width: 180px; min-width: 180px;
+  background: var(--tk-surface);
+  border-right: 1px solid var(--tk-border);
+  padding: var(--sp-3) 0;
+  display: flex; flex-direction: column;
+}
+.jira-sidebar-title {
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--tk-fg-dim);
+  padding: 0 var(--sp-3); margin-bottom: var(--sp-3);
+}
+.jira-sidebar-btn {
+  display: flex; align-items: center; gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent; border: none; color: var(--tk-fg-dim);
+  font-size: 0.85rem; cursor: pointer; text-align: left;
+  transition: background var(--duration) var(--ease), color var(--duration) var(--ease);
+}
+.jira-sidebar-btn:hover { background: var(--tk-surface-light); color: var(--tk-fg); }
+.jira-sidebar-btn.active { background: var(--tk-accent); color: var(--tk-fg); }
+.jira-sidebar-icon { width: 20px; display: flex; align-items: center; flex-shrink: 0; }
+.jira-sidebar-icon svg { width: 16px; height: 16px; stroke: currentColor; }
+.jira-sidebar-label { flex: 1; }
+.jira-sidebar-badge {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--tk-accent);
+  flex-shrink: 0;
+}
+
+.jira-content { flex: 1; overflow-y: auto; }
+.jira-panel { display: none; }
+.jira-panel.active { display: block; }
+
+.wk-table-area { min-height: 100px; }
+.wk-tm-area { margin-top: var(--sp-2); }
+
+/* ── Cache indicator states ──────────────────────────────────── */
+.wk-cached { color: var(--tk-green); }
+.wk-live { color: var(--tk-fg-dim); }
+.wk-stale { color: var(--tk-warn); }
+
+/* ── Nav badge (global) ──────────────────────────────────────── */
+.nav-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 4px;
+  border-radius: 9px; background: var(--tk-accent); color: var(--tk-bg);
+  font-size: 0.68rem; font-weight: 700; line-height: 1;
+  margin-left: auto; flex-shrink: 0;
+}
+
