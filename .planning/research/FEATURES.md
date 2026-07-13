@@ -1,297 +1,195 @@
 # Feature Research
 
-**Domain:** Documentation Search Engine (internal tool)
-**Researched:** 2026-07-01
-**Confidence:** HIGH
+**Domain:** Insight / notification layer for an existing Jira worklog tracker (Alps Toolkit Jira Tracker, M4)
+**Researched:** 2026-07-13
+**Confidence:** MEDIUM (Clockify + Harvest feature pages fetched and verified; Toggl/Harvest/Tempo behaviors from training data — flagged LOW where unverified)
+
+---
+
+## Scope Note
+
+This file covers ONLY the new Insight/Notification features for M4. The base tracker (Weekly View, Assigned tab, Config tab, worklog CRUD, meeting shortcut) is treated as an existing dependency, not re-researched. All complexity ratings are relative to that existing codebase.
+
+---
+
+## How Real Tools Do This (Grounding)
+
+Pulled from live vendor feature pages + training knowledge. These inform what "table stakes" means.
+
+| Tool | Relevant behavior | Source |
+|------|-------------------|--------|
+| **Clockify** | Timesheet has **Reminders** ("Reminder for due timesheets"); **Auto-tracker → Gaps** ("Identify gaps in productivity"); **Approval → Reminders** ("Send late timesheet reminders"); **Weekly** report type; **Time off / Holidays** module (define holidays, balances) | clockify.me/features (fetched, HIGH) |
+| **Harvest** | **Custom reminders** ("Create automated reminders to help your team track time regularly and accurately"); **Activity log** ("review time entries and changes. Identify irregular or missing entries to ensure accuracy"); **Budget on target** (live budget vs tracked); capacity reporting | getharvest.com/features/time-tracking (fetched, HIGH) |
+| **Toggl Track** | Saved reports + **weekly email digests**; **reminders** for unfilled time; project **progress vs estimate** dashboard; billable-rate targets | training (LOW–MED, unverified) |
+| **Jira Tempo** | **Timesheet** with **missing-worklog highlighting**, **period target** (e.g. 40h contract), **fill-timesheet** nudges, approval workflow | training (LOW–MED, unverified) |
+| **Generic timesheet SaaS** | "Ghost day" = a working day with zero entries; "under-target week" = sum < contract; end-of-week summary email; manager late-timesheet reminders | industry pattern (MED) |
+
+**Cross-tool pattern:** detection (ghost days / missing entries) → summarize (week vs target) → notify (reminder/digest) → act (fill/submit). Tools separate *detecting* from *auto-filling* — none auto-write hours because that corrupts timesheet integrity. Harvest explicitly frames the activity log as "identify irregular or missing entries," not "fix them."
+
+---
 
 ## Feature Landscape
 
 ### Table Stakes (Users Expect These)
 
-Features users assume exist. Missing these = product feels incomplete.
-Based on Algolia DocSearch, Meilisearch, mkdocs-material search, and Sphinx search conventions.
+| Feature | Why Expected | Complexity | Notes / Dependency on existing model |
+|---------|--------------|------------|--------------------------------------|
+| **Missed-day (ghost-day) detection** | Core ask; every timesheet tool flags zero-entry working days. | MED | Needs `date` + `time_spent_seconds` (both already in worklog dict). Group by day; a working day with 0s = missed. |
+| **Under-target-week alert** | "am I below 40h?" is the headline question. | LOW–MED | Sum week's `time_spent_seconds`; compare to target. Reuses existing weekly endpoint payload. |
+| **Configurable weekly target (default 40h)** | Users have different contracts; 40h is just a default. | LOW | NEW config field. Drives both detectors. |
+| **In-app Insights tab** | A place to *see* the gaps, not just be told. | LOW (UI) | New tab; reads a detection endpoint. No new data needed beyond worklogs + target. |
+| **Tab-bar badge when gaps exist** | At-a-glance "you have something to fix." | LOW | Pure UI state from detection result. Recomputes on tab open against cached data. |
+| **Mark non-working days (holidays/PTO) that recalc target** | 40h→32h for a 4-day week is an explicit user requirement; without it the detector false-positives every short week. | MED–HIGH | NEW data (set of dates or per-week day-off flags). **Critical**: without this, under-target alert is useless on holiday weeks. See formula below. |
+| **Working-day definition (default Mon–Fri)** | Week is Mon–Sun (7 days) per `_week_range`, but Sat/Sun must NOT count as "missed." | LOW–MED | Needed so ghost-day detection only fires on Mon–Fri (or user-defined) days. |
+| **Toggleable browser notifications** | Users want the alert pushed, but also want it OFF. | MED | Notification API + permission prompt + NEW toggle in Config. Reuses detection output. |
+| **Quick "fill missing day" action** | The natural payoff of detecting a gap. | MED | Reuses **existing** `POST /api/jira/worklog` (issue_key, time_spent, comment, started). UI just pre-fills date + suggested amount. |
 
-| Feature | Why Expected | Complexity | Notes |
-|---------|--------------|------------|-------|
-| Keyword full-text search | Minimum viable search. Users expect to type words and get matching files. | LOW | SQLite FTS5 handles this natively via `MATCH` operator. Default unicode61 tokenizer supports basic word tokenization. |
-| Search result listing with file name + relative path | Users need to identify which file matched and where it lives. | LOW | Store file path in FTS5 table as indexed column. Display in results as "filename.xyz — repo/sub/path/". |
-| Match snippet with surrounding context | Users need to see *why* a file matched, not just *that* it matched. Standard in every doc search tool (Algolia cropping, mkdocs snippets). | LOW | SQLite FTS5 `snippet()` auxiliary function returns text fragments with matches highlighted. Built-in, no extra deps. |
-| Relevance-ranked results (BM25) | Raw ordering is useless. Users expect best match first. | LOW | SQLite FTS5 built-in `bm25()` ranking function. Sort by `ORDER BY rank`. Tunable via column weights. |
-| "No results" state | Empty results without feedback feels broken. | LOW | Return HTTP 200 with empty array + message from backend. Frontend renders "No results for 'query' — try different keywords". |
-| Initial index build on startup | Search must work without manual setup. Table stakes for any search tool. | MEDIUM | Walk all 3 repo directories, extract text from each file, insert into FTS5 table. Runs in `startup()` lifecycle hook. Similar to competence plugin's schema init pattern. |
-| Multi-format support (.docx, .pdf, .doc, .rst, .drawio) | Project explicitly requires these formats. Missing any = broken requirement. | MEDIUM | pdf: `pdfplumber` (best text extraction quality). docx: `python-docx`. doc: `python-pptx` for pptx, `textract` or antiword wrapper for legacy .doc. rst: plain `.read_text()`. drawio/graphml: extract XML text nodes. Each format needs its own parser — this is the bulk of initial complexity. |
-| Git repo sync (3 repos, pull latest) | Content must be current. Stale docs → useless search. | MEDIUM | `git pull` via subprocess in each repo directory. Run on startup + daily schedule + manual trigger. Simple pattern: `subprocess.run(["git", "-C", path, "pull"], capture_output=True)`. Handle auth (SSH keys already configured on host). Check git status before pull to avoid conflicts. |
-| Basic query syntax (multi-word AND, phrase search with quotes) | Users naturally type multi-word queries and expect AND behavior. Phrase search with quotes is universal (Google, every search engine). | LOW | FTS5 handles both natively: `'word1 word2'` = implicit AND; `'"exact phrase"'` = exact phrase match. No custom parsing needed. |
-| Loading indicator during search | Users need to know the system is working. Standard UX. | LOW | Show spinner while API call is in flight. Same pattern as competence plugin's spinner div: `<div class="spinner"></div>`. |
-| Manual sync trigger button | Explicit refresh mechanism. Users need a way to force re-index after repo updates. | LOW | POST endpoint `/api/docs/sync` that triggers background git pull + re-index. Same pattern as `POST /api/competence/sync`. Frontend button with "Syncing..." disabled state. |
+**Target recalculation formula (core to the missed/under-target logic):**
+```
+expected_week_total = (target / default_working_days) * (working_days_this_week − non_working_days_this_week)
+```
+With target=40h, default_working_days=5, 4 working days (one marked off) → 32h. This is the model that makes "40h→32h" work and avoids false alerts on holiday weeks.
 
 ### Differentiators (Competitive Advantage)
 
-Features that set this apart from a basic `grep` over files. Not required, but high value for internal users.
-
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Real-time search-as-you-type (debounced) | Dramatically faster discovery. User sees results refine with each keystroke. Standard in Algolia/DocSearch, Meilisearch, every modern search. | MEDIUM | Frontend: `<input>` with `oninput` handler, debounce 150-250ms before API call. Abort in-flight requests when new query arrives (`AbortController`). Backend: SQLite FTS5 queries are sub-50ms for ~3000 docs — fast enough for this pattern. |
-| Search term highlighting in results (bold/color) | Visual scan of results is much faster when matched terms are highlighted. Primary UX pattern in Algolia DocSearch, Meilisearch. | LOW-MEDIUM | Backend: FTS5 `highlight()` wraps matches in `<b>` tags — include highlighted snippet in API response. Frontend: render as innerHTML. Also store match positions for client-side highlighting if needed. |
-| Inline file preview with highlighted search terms | Users can read context without leaving search. Saves context-switching. Modeled on Algolia DocSearch hit preview + mkdocs-material inline expansion. | MEDIUM | Click result → fetch full file text via API → render in expandable panel below result. Apply highlight spans at match positions. Keep preview truncated (~500 chars around first match) for large files. |
-| File-type filtering (docx/pdf/rst/drawio) | Targeted search when user knows format. "Show me only PDFs about deployment" | LOW | Store `file_type` column in FTS5 table. Frontend: dropdown or chip filters. Backend: add `AND file_type = ?` to FTS5 query. FTS5 column filters handle this efficiently. |
-| Result count display | Quick feedback on search scope. "42 results for 'deployment config'" | LOW | Return `total_count` in API response alongside results. Frontend renders count above result list. |
-| Keyboard navigation (arrow keys, Enter, Escape) | Power-user efficiency. Standard in every search modal (Algolia, VS Code, Command Palette). | MEDIUM | Frontend: `keydown` handler on search input. Up/Down moves focus highlight through result list. Enter opens top/highlighted result. Escape clears search or closes preview. Track `selectedIndex` in JS state. |
-| Repo source indicator per result | Users need to know which repo a result comes from (3 repos merged into one index). | LOW | Store `repo_name` column. Frontend shows small badge/tag per result (e.g., "repo-config", "repo-docs", "repo-manuals"). Color-coded for quick visual scan. |
-| Sync progress feedback | Long sync operations (extracting ~3000 files) feel broken without progress. | MEDIUM | Same pattern as competence plugin: poll `GET /api/docs/sync/status` returning `{"phase": "...", "done": N, "total": N}`. Frontend shows progress bar or phase text. |
-| Search scope indicator (which repos are indexed) | Shows users what's searchable. Builds trust in results. | LOW | At page top: "Searching across 3 repos: api-docs (1.2K files), user-guides (800 files), internal-wiki (1K files)". Last sync timestamp displayed nearby. |
+| **Non-working-day-aware target (user-managed, local)** | Clockify's "Time off/Holidays" is team-admin context; here the user marks their own days off locally — simpler, faster, no approval chain. Directly delivers the user's 4-day-week example. | MED–HIGH | Builds on the table-stakes "mark non-working days" — the *local, personal* framing is the differentiator. |
+| **Per-teammate gap view** | Tracker already has a teammates list + per-user weekly fetch. Peer/self gap spotting (not manager shaming) is unusual and cheap here. | MED | Reuses `teammates` config + existing per-account-id weekly fetch. |
+| **One-click "top up short week" to meeting ticket** | Extends the existing meeting shortcut to a "fill the remaining hours" action. Very low cost, high delight. | LOW–MED | Reuses meeting endpoint + suggested delta = target − logged. |
+| **Local-first instant insights** | Because M4 adds SQLite persistence + shared in-memory store, insights render with zero API call on tab switch — unlike cloud tools that need a refresh. | LOW | Depends on M4 persistence phase; differentiator vs SaaS refresh latency. |
+| **Historical under-target trend / streak** | "3 of last 4 weeks under target" is motivating and only possible because we persist worklogs locally across weeks. | MED | Requires SQLite persistence (M4) + storing target config over time. |
+| **Ghost-day drill-down** | Click a missed day → see what WAS logged that week / adjacent days, to judge if it's truly missing or just mis-logged. | LOW | UI-only; reads existing weekly payload. |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
-Features that seem good but create problems at this scope. Explicitly out of scope for M3.
+| Anti-Feature | Why Requested | Why Problematic | Alternative |
+|--------------|---------------|-----------------|-------------|
+| **Auto-logging hours for missed days** | "Just fill it for me." | Falsifies the timesheet; breaks audit/compliance integrity. Every real tool (Harvest activity log, Tempo) *identifies* missing entries but never *writes* them. | Draft + one-click confirm via existing worklog endpoint. |
+| **Real-time "you're behind today" pop-ups every X min** | Micro-nudging seems helpful. | Notification fatigue kills adoption; defeats the "toggleable" value. | End-of-day or end-of-week digest only. |
+| **Manager-facing enforcement / team shaming board** | "See who's slacking." | Not the use case (internal dev tool, self/peer view); privacy/trust risk. | Opt-in per-teammate view only. |
+| **AI-estimated "expected hours" from history** | Smart targets sound impressive. | Misleading; averages ≠ contract; erodes trust in the number. | Explicit configured target + manual non-working-day marks. |
+| **Cross-week deficit rollover** | "Carry the 8h I missed into next week." | Contracts are per-week; rollover confuses the alert and double-penalizes. | Independent per-week evaluation. |
+| **Idle/away-time & screenshot tracking (Clockify Location/Screenshots)** | "Prove they worked." | Privacy-invasive, irrelevant for an internal Jira tool; banned by culture. | Out of scope entirely. |
+| **Mobile push notifications** | Parity with SaaS apps. | The product is a browser SPA on an internal network; no mobile app. | Browser notifications only. |
 
-| Feature | Why Requested | Why Problematic | Alternative |
-|---------|---------------|-----------------|-------------|
-| NLP/semantic search (vector embeddings, meaning-based matching) | "Search that understands what I mean, not just keywords" | Requires embedding model (OpenAI API or local), vector DB or SQLite extension, 10-100x query latency increase, significant cost if using API. Massive overkill for 3000 internal docs where keyword search is perfectly adequate. | Use SQLite FTS5 with trigram tokenizer for substring matching — covers most "semantic-like" needs without ML complexity. |
-| OCR for scanned PDFs / images | "What about scanned older docs?" | Requires Tesseract OCR installation, significant processing time per file (seconds to minutes), language model files, poor accuracy on technical documents. 10x implementation complexity for edge case. | Flag scanned PDFs during text extraction (detect near-zero text output) and tag as "unsearchable — manual review needed". Accept ~5% exclusion rate for scanned docs. |
-| Full-text highlighting in very large files (10MB+) | "Show me all matches highlighted in the full document" | Loading entire 100MB PDF as highlighted HTML in browser freezes the UI. Memory issues on both backend (reading full file) and frontend (rendering). | Truncate preview to ~500 chars around first 3 match clusters. Show "View full file" link to open raw file. Document the preview limit. |
-| Web crawling / external URL indexing | "Why not index Confluence/wiki too?" | Requires separate crawl infrastructure, rate limiting, auth handling, HTML parsing, link following. Fundamentally different from local file search. | Defer to future milestone. Suggest users export Confluence space to static HTML and add to repo directories. |
-| Advanced query DSL (NEAR, wildcard, boolean operators in UI) | "Power users want complex queries" | UX complexity explodes. Most users type 2-3 words. Building a query builder UI is a separate product. | Support FTS5 query syntax passthrough for power users (if they type `NEAR(...)` or `AND`/`OR`, pass it raw to FTS5). But don't build UI for it. |
-| Multi-language stemming (Lithuanian, Russian, etc.) | Internal docs might contain non-English text | Stemming for non-English languages requires custom tokenizer configuration in FTS5 or external libraries. Adds complexity with low payoff — most technical documentation is English. | Default unicode61 tokenizer handles Latin text fine. If specific language needs emerge, add porter stemmer for English, or configure FTS5 locale option later. |
-| Search analytics / click tracking | "Which queries return zero results?" | Requires analytics pipeline, storage, dashboard — a separate feature set. | Log zero-result queries to application logger. Review logs manually. Defer full analytics to future milestone. |
-| Offline search (client-side index) | "What if the server is down?" | Requires building the entire search index in JS (lunr.js or similar), syncing index to browser, handling index size for 3000 files. Double implementation (backend + frontend search logic). | Not needed — this is an internal tool on company network. Server uptime is near 100%. If server is down, users have bigger problems. |
+---
 
 ## Feature Dependencies
 
 ```
-[1. Git Repo Sync] ──required by──> [2. Text Extraction] ──required by──> [3. FTS Index Building]
-                                                                                    │
-[4. Keyword Search API] ◄────────────────────────────────────────────────────────────┘
-        │
-        ├──required by──> [5. Result Snippets & Highlighting]
-        ├──required by──> [6. Result Listing UI]
-        │                       │
-        │                       └──enhanced by──> [7. Keyboard Navigation]
-        │                       └──enhanced by──> [8. File-Type Filtering]
-        │
-        └──enhanced by──> [9. Search-as-you-type] ──conflicts with──> [Debounce too aggressive = feels laggy]
-                                                                               │
-                                                                   [Optimize: 150ms debounce, AbortController]
-```
+[Insights Engine: detect missed days + under-target week]
+    └──requires──> [Configurable weekly target (40h default)]
+    └──requires──> [Working-day definition (Mon–Fri)]
+    └──requires──> [Mark non-working days (holidays/PTO)]
+                         └──enables──> [Target recalculation 40h→32h]
 
-```
-[10. Inline File Preview] ──requires──> [Result Listing UI]
-[10. Inline File Preview] ──requires──> [File content API endpoint]
+[Browser notifications (toggleable)]
+    └──requires──> [Insights Engine output]
+    └──requires──> [Notification permission + Config toggle]
 
-[11. Manual Sync Button] ──reuses──> [Sync pipeline from #1-3]
-[11. Manual Sync Button] ──reuses──> [Status polling from competence plugin pattern]
+[Tab-bar badge]
+    └──requires──> [Insights Engine output]
+
+[Gap-fill: fill missed day / top-up week]
+    └──requires──> [Insights Engine (which day / how much)]
+    └──reuses────> [POST /api/jira/worklog]  (existing endpoint)
+    └──reuses────> [Meeting shortcut]        (for top-up action)
+
+[Historical trend / streak]
+    └──requires──> [SQLite local persistence]  (M4 separate phase)
+    └──requires──> [Target config stored over time]
+
+[Per-teammate gap view]
+    └──reuses────> [teammates config]        (existing)
+    └──reuses────> [per-account-id weekly fetch] (existing)
+
+[Local-first instant insights]
+    └──requires──> [Shared in-memory store across tabs]  (M4 UI redesign phase)
 ```
 
 ### Dependency Notes
 
-- **Text Extraction requires Git Sync:** Files must exist on disk before extraction. Git pull must complete first.
-- **FTS Index Building requires Text Extraction:** FTS5 INSERT needs extracted text content (one row per file).
-- **All search features require FTS Index:** The index is the foundation. No index = no search.
-- **Inline Preview requires Result Listing:** User clicks a result to see preview. Preview can't exist without results.
-- **Search-as-you-type requires fast queries:** FTS5 on 3000 docs should be <50ms. If extraction yields very large files, consider limiting indexed content per file (first 50KB of text).
-- **Keyboard navigation conflicts with debounce aggressiveness:** If debounce is too short, rapid keystrokes cause result flicker. 250ms is a good balance for internal tool use. Competence plugin uses 2s polling — search needs to be much faster.
+- **Mark non-working days requires a NEW data store.** Existing schema has no field for "this date is a day off." Must be added (SQLite table or config blob). This is the single highest-leverage missing piece — without it the under-target detector cannot distinguish a holiday week from a lazy week.
+- **Gap-fill is cheap BECAUSE the worklog endpoint already exists.** Do not build new Jira-write logic; wrap the existing `POST /api/jira/worklog` with date + suggested-amount pre-fill.
+- **Historical trend depends on the M4 persistence phase, not on this feature set.** Sequence it after SQLite lands.
+- **Timezone caveat (verify during build):** worklog `date` is derived as `started[:10]`, which is the **UTC** date from Jira (`+0000`). The milestone defines the week as Mon–Sun in **local** time. Late-evening logs can shift a day. The detection engine must normalize to local date before grouping, or ghost-day detection will mis-attribute entries. Flag for the implementation phase.
 
-## UX Patterns (How Documentation Search UIs Work)
-
-Based on analysis of Algolia DocSearch, Meilisearch, Docusaurus search, and mkdocs-material search. These are the standard UX conventions users expect.
-
-### Search Input Placement
-
-- **Position:** Top of the plugin page, full width or centered (600-800px max-width)
-- **Placeholder text:** "Search documentation..." or "Search across 3 repos..."
-- **Visual:** Search icon (magnifying glass) on left, clear (X) button appears when text entered
-- **Focus behavior:** Auto-focus on plugin load (users open the search tab to search)
-
-### Results Layout
-
-```
-┌─────────────────────────────────────────────────┐
-│  🔍 [deployment configuration_______________ ×]  │  ← Search input
-│  42 results for "deployment configuration"       │  ← Result count
-├─────────────────────────────────────────────────┤
-│  📄 deployment-guide.rst    [user-guides]        │  ← File name + repo badge
-│     /setup/deployment-guide.rst                  │  ← Full path
-│     ...to configure the **deployment** pipeline  │  ← Snippet with highlights
-│     for production, use the **config** file...   │
-├─────────────────────────────────────────────────┤
-│  📄 config-reference.pdf    [api-docs]           │
-│     /reference/config-reference.pdf              │
-│     ...the **deployment** settings are defined   │
-│     in the main **configuration** section...     │
-├─────────────────────────────────────────────────┤
-│  📄 setup-drawio.drawio     [internal-wiki]      │
-│     /diagrams/setup-drawio.drawio                │
-│     ...**Deployment** flow: build → **config**   │
-│     → test → release...                          │
-└─────────────────────────────────────────────────┘
-```
-
-### Result Item Anatomy
-
-Each result item shows:
-1. **File icon** — different icon per file type (PDF icon, DOCX icon, code icon for RST)
-2. **File name** — bold, clickable, primary identifier
-3. **Repo badge** — small colored tag showing source repo (e.g., "[api-docs]" in blue)
-4. **Full path** — grey, smaller text, shows directory context
-5. **Match snippet** — 2-3 lines of text around the match, with **matched terms bolded/highlighted**
-6. **Hover state** — background color change on hover (standard row highlighting)
-
-### Keyboard Navigation
-
-| Key | Action |
-|-----|--------|
-| `↓` / `↑` | Move selection highlight down/up through results |
-| `Enter` | Open selected result (expand inline preview) |
-| `Escape` | Clear search query / close preview if open |
-| `Ctrl+K` (or `/`) | Focus search input from anywhere on page |
-
-### Inline Preview Pattern
-
-When user clicks a result or presses Enter:
-- Result row expands downward (accordion pattern) — not a modal
-- Shows first ~500 characters of file content with search terms highlighted
-- Header shows full file path, file size, last modified date
-- "Open raw file" link at bottom to open in new tab (for binary formats like PDF/DOCX, opens the file directly)
-- Only one preview open at a time — opening new one closes previous
-
-### Empty / Error States
-
-| State | Display |
-|-------|---------|
-| No query | Placeholder text in search box, no results area shown |
-| No results | "No results for 'query'. Try different keywords or check spelling." |
-| Index not built | "Search index is building... (X of Y files processed)" with progress bar |
-| Sync never run | "Click Sync Now to index documentation repositories." with Sync button |
-| Search error | Toast notification "Search failed: [error message]" (same toast pattern as core.js `toast()`) |
-| Empty repo | "Repo 'X' returned 0 files — check path and permissions" in sync status |
-
-### Search-as-you-type UX
-
-```
-User types "d" → debounce 250ms → query "d" → shows all results containing "d" (broad)
-User types "de" → abort previous request → debounce 250ms → query "de" → narrows
-User types "dep" → abort previous request → debounce 250ms → query "dep" → narrower
-User pauses → query "deployment" → final narrow results
-```
-
-Key behaviors:
-- **Abort in-flight:** Each new keystroke cancels the previous API request via `AbortController`
-- **Debounce:** 250ms is right for typing speed. Shorter = too many requests. Longer = feels laggy.
-- **Minimum query length:** Search after 2+ characters. 1-character queries are too broad to be useful.
-- **No results during typing:** Don't show "no results" during active typing — only after debounce settles.
-
-### Grading System for Results (Optional Differentiator)
-
-Noted from Meilisearch and Algolia: search results can include a relevance score or confidence indicator. For this tool, keep it simple but useful:
-- Sort by BM25 score (FTS5 `rank` column) — higher = more relevant
-- Optionally show relevance % (but this is a P3 feature — most users just need the right file, not a score)
+---
 
 ## MVP Definition
 
-### Launch With (v1 — Minimum Viable Search)
+### Launch With (v1 — the insight core)
 
-- [ ] **Git repo cloning + pull** — clone 3 repos on first run, pull updates on demand. Essential for content to exist.
-- [ ] **Text extraction pipeline** — pdf (pdfplumber), docx (python-docx), doc (antiword/textract), rst (plain), drawio (XML text extraction). Essential for content to be searchable.
-- [ ] **FTS5 index building** — SQLite FTS5 virtual table with file path, content, repo name, file type. Foundation of all search.
-- [ ] **Keyword search API** — `GET /api/docs/search?q=...` returning JSON with file name, path, snippet, repo. Minimum search functionality.
-- [ ] **Result listing UI** — display file name, path, snippet, repo badge in a scrollable list. Users need to see results.
-- [ ] **Manual sync button** — trigger git pull + re-index from UI. Users need to refresh content.
-- [ ] **Sync status endpoint** — `GET /api/docs/sync/status` to show progress. Users need feedback during long syncs.
-- [ ] **Empty and error states** — proper handling of no results, index building, sync errors. Users need to know what's happening.
+- [ ] Missed-day (ghost-day) detection — Mon–Fri only
+- [ ] Under-target-week alert vs 40h default
+- [ ] Configurable weekly target
+- [ ] Working-day definition (Mon–Fri default)
+- [ ] Mark non-working days + target recalculation
+- [ ] In-app Insights tab
+- [ ] Tab-bar badge
+- [ ] Quick "fill missing day" (reuse existing endpoint)
 
-**Why these:** These 8 items form the complete search loop: content exists → content is indexed → user searches → user sees results → user can refresh content. Everything else enhances this loop.
+### Add After Validation (v1.x)
 
-### Add After Validation (v1.x — What Makes It Good)
+- [ ] Toggleable browser notifications
+- [ ] One-click "top up short week" to meeting ticket
+- [ ] Per-teammate gap view
+- [ ] Ghost-day drill-down
 
-- [ ] **Search-as-you-type with debounce** — significantly better UX, add once basic search works
-- [ ] **Search term highlighting in snippets** — visual scan improvement, low technical risk via FTS5 `highlight()`
-- [ ] **File-type filter chips** — quick UX win, simple backend filter
-- [ ] **Result count display** — trivial to add, high perceived quality
-- [ ] **Repo source badges** — color-coded tags, quick visual win
-- [ ] **Keyboard navigation** (arrows + Enter) — power user feature, medium frontend complexity
-- [ ] **Inline file preview** — expands result row, shows first ~500 chars with highlights
+### Future Consideration (v2+, needs persistence)
 
-### Future Consideration (v2+)
+- [ ] Historical under-target trend / streak
+- [ ] Local-first instant insight refresh on tab switch (post UI-redesign)
+- [ ] Smart-refresh only when cache invalidated
 
-- [ ] **Typo tolerance** — requires trigram tokenizer or edit-distance search. Changes index strategy.
-- [ ] **Search suggestions / autocomplete** — needs separate suggestion index or trie. New backend endpoint.
-- [ ] **Faceted search** (filter by repo, date modified) — needs metadata columns in FTS5 index
-- [ ] **Deep-linkable search URLs** — `?q=deployment` persists search in URL
-- [ ] **Zero-result query logging** — simple logging, but needs dashboard to be useful
-- [ ] **Search scope configuration** — allow adding/removing repos without code change
-- [ ] **Relevance tuning UI** — column weight adjustment for power users
+---
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Text extraction pipeline (5 formats) | HIGH | HIGH | P0 — Foundation |
-| FTS5 index building | HIGH | MEDIUM | P0 — Foundation |
-| Git repo sync | HIGH | MEDIUM | P0 — Content source |
-| Keyword search API | HIGH | LOW | P0 — Core feature |
-| Result listing UI | HIGH | LOW | P0 — Core feature |
-| Manual sync button | HIGH | LOW | P0 — Content refresh |
-| Sync status + progress | HIGH | LOW | P0 — Feedback |
-| Empty/error states | MEDIUM | LOW | P1 — Polish |
-| Search-as-you-type | HIGH | MEDIUM | P1 — UX |
-| Term highlighting in snippets | HIGH | LOW | P1 — UX |
-| File-type filtering | MEDIUM | LOW | P1 — Utility |
-| Result count display | MEDIUM | LOW | P1 — Polish |
-| Repo source badges | MEDIUM | LOW | P1 — Clarity |
-| Keyboard navigation | MEDIUM | MEDIUM | P2 — Power users |
-| Inline file preview | MEDIUM | MEDIUM | P2 — Power users |
-| Typo tolerance | MEDIUM | HIGH | P3 — Future |
-| Search suggestions | LOW | HIGH | P3 — Future |
-| Analytics / logging | LOW | MEDIUM | P3 — Future |
+| Missed-day detection | HIGH | MED | P1 |
+| Under-target-week alert | HIGH | LOW–MED | P1 |
+| Configurable 40h target | HIGH | LOW | P1 |
+| Mark non-working days + recalc | HIGH | MED–HIGH | P1 |
+| Working-day definition (Mon–Fri) | HIGH | LOW–MED | P1 |
+| Insights tab | HIGH | LOW | P1 |
+| Tab-bar badge | MED | LOW | P1 |
+| Quick fill-missed-day | HIGH | MED | P1 |
+| Toggleable browser notifications | MED | MED | P2 |
+| Top-up-short-week (meeting) | MED | LOW–MED | P2 |
+| Per-teammate gap view | MED | MED | P2 |
+| Ghost-day drill-down | LOW–MED | LOW | P2 |
+| Historical trend / streak | MED | MED | P3 |
+| Local-first instant insights | MED | LOW | P3 (post-redesign) |
 
-## Competitor Feature Analysis
-
-Compared against standard documentation search tools relevant to this domain.
-
-| Feature | Algolia DocSearch | mkdocs-material (lunr.js) | Meilisearch | Our Approach |
-|---------|-------------------|---------------------------|-------------|-------------|
-| Search index type | Cloud-hosted Algolia | Client-side lunr.js (JSON) | Self-hosted server | SQLite FTS5 in FastAPI backend |
-| Search-as-you-type | Yes (modal) | Yes (dropdown) | Yes (API-driven) | Yes (API-driven, debounced) |
-| Result snippets | Yes (cropping + highlight) | Yes (context around match) | Yes (cropping + highlight) | Yes (FTS5 snippet()) |
-| Typo tolerance | Yes (built-in) | No (exact match) | Yes (configurable) | Deferred to v2 |
-| Keyboard navigation | Full (modal pattern) | Basic (arrows) | Depends on frontend | Full (arrows + Enter + Escape) |
-| Faceted search | Yes (language, version, tags) | No | Yes (filterable attributes) | File-type filtering, repo filtering |
-| Inline preview | No (external link) | No (external link) | No (external link) | Yes — inline expandable panel |
-| Ranking | Configurable | BM25 (built-in lunr) | Customizable rules | BM25 (FTS5 built-in) |
-| Multi-format support | Web crawl only (HTML) | Markdown only | Any JSON document | Direct file parsing (pdf, docx, doc, rst, drawio) |
-| Offline support | No | Yes (full client index) | No | No (server-based, internal network) |
-| Free tier | Yes (open source docs) | Fully free | Open source, self-hosted | N/A — internal tool |
-
-**Key insight:** Our differentiator is direct multi-format file parsing + inline preview. No existing doc search tool does both. Algolia crawls HTML only. mkdocs only does Markdown. Meilisearch needs pre-parsed JSON. We can parse the raw files directly and show previews — that's the unique value proposition.
-
-## Integration with Existing Plugin Infrastructure
-
-All features must follow the established plugin patterns from `competence.py`:
-
-| Concern | Pattern to Follow | Reference |
-|---------|-------------------|-----------|
-| Plugin class | Extend `ToolkitPlugin`, set `id`/`name`/`icon`/`order`, implement `register_routes()` + `startup()` + `shutdown()` | `base.py` lines 28-53 |
-| Database | SQLite with WAL mode, `threading.Lock()`, per-plugin DB file, schema versioning in `sync_state` table | `competence.py` lines 41-91 |
-| Background tasks | `asyncio.create_task()` in route handler, status polling via `GET /status` endpoint, progress stored as JSON in `sync_state` | `competence.py` lines 609, 443-479 |
-| Frontend | Import from `core.js` (`h`, `api`, `toast`, `registerPlugin`, `icons`, `createTabs`, `createTable`), define `init(container)` + `destroy()` | `competence.js` lines 4-6, 16-18 |
-| API style | All endpoints under `/api/docs/...`, return JSON, use `HTTPException` for errors | Pattern from `competence.py` routes |
-| Sync pattern | POST triggers, GET polls, `in_progress` flag prevents double-sync, `last_sync` timestamp tracked | `competence.py` lines 600-633 |
-| Route registration | Decorator pattern inside `register_routes()` method on FastAPI app instance | `competence.py` lines 579+ |
-
-## Sources
-
-- **Algolia DocSearch** — https://docsearch.algolia.com/docs/what-is-docsearch (MEDIUM confidence — official docs, verified)
-- **Meilisearch Features** — https://www.meilisearch.com/docs/learn/what_is_meilisearch/features (HIGH confidence — official docs, verified)
-- **Docusaurus Search** — https://docusaurus.io/docs/search (HIGH confidence — official docs, verified)
-- **Material for MkDocs Search** — https://squidfunk.github.io/mkdocs-material/setup/setting-up-site-search/ (HIGH confidence — official docs, verified)
-- **SQLite FTS5** — https://www.sqlite.org/fts5.html (HIGH confidence — official documentation, verified)
-- **Algolia Autocomplete** — https://www.algolia.com/doc/ui-libraries/autocomplete/introduction/what-is-autocomplete/ (HIGH confidence — official docs)
-- **Competence Plugin (existing codebase)** — `app/plugins/competence.py` (HIGH confidence — production code, verified)
-- **Core.js Frontend Framework** — `app/static/js/core.js` (HIGH confidence — production code, verified)
-- **ToolkitPlugin Base Class** — `app/plugins/base.py` (HIGH confidence — production code, verified)
+**Priority key:** P1 = must have for launch · P2 = should have · P3 = future
 
 ---
 
-*Feature research for: Documentation Search Engine Plugin*
-*Researched: 2026-07-01*
-*Confidence: HIGH — All claims verified against official docs or production codebase*
+## Competitor Feature Analysis
+
+| Feature | Clockify | Harvest | Our Approach (Alps Jira Tracker) |
+|---------|----------|---------|-----------------------------------|
+| Ghost-day / missing-entry detection | Auto-tracker "Gaps" (productivity) | Activity log "identify missing entries" | Worklog-grouped ghost-day detection on Mon–Fri |
+| Under-target alert | Weekly report + budget | Budget-on-target | Weekly sum vs configured 40h (recalc on day-off marks) |
+| Reminders | Timesheet + approval reminders | Custom automated reminders | Toggleable browser notification + in-app badge |
+| Non-working-day handling | Time off / Holidays (team-admin) | — | User-managed local day-off marks (no admin) |
+| Fill-the-gap action | Manual timesheet entry | Manual + approval | One-click fill via existing worklog endpoint |
+| Team visibility | Manager/team dashboards | Team capacity | Opt-in per-teammate peer view |
+
+---
+
+## Sources
+
+- Clockify Features — https://www.clockify.me/features (fetched 2026-07-13, HIGH confidence): Timesheet Reminders, Auto-tracker "Gaps," Approval late-timesheet Reminders, Weekly reports, Time off/Holidays.
+- Harvest Time Tracking — https://www.getharvest.com/features/time-tracking (fetched 2026-07-13, HIGH confidence): Custom reminders, Activity log ("identify irregular or missing entries"), Budget-on-target.
+- Toggl Track / Jira Tempo behaviors — training knowledge only (LOW–MED, **unverified**; treat as hypothesis, validate in implementation phase if precise parity matters).
+- Existing data model — `app/plugins/jira_tracker.py` (read): worklog dict has `date` (UTC-derived `started[:10]`), `time_spent_seconds`, `ticket_key`, `comment`; week = Mon–Sun via `_week_range`; `POST /api/jira/worklog` and meeting shortcut exist for gap-fill reuse.
+- Project context — `.planning/PROJECT.md` M4 goal (local persistence, UI redesign, notifications, insights engine, gap-fill tools).
+
+---
+
+*Feature research for: Jira Tracker M4 Insight/Notification layer*
+*Researched: 2026-07-13*

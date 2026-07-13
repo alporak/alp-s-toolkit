@@ -1,596 +1,501 @@
-# Architecture Research: Documentation Search Engine Plugin
-
-**Domain:** Full-text search over internal documentation repos
-**Researched:** 2026-07-01
-**Confidence:** HIGH (source code verified against existing plugin patterns)
-
-## System Overview
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         FastAPI Application                           │
-│  ┌────────────────────────────────────────────────────────────────┐  │
-│  │                    Plugin Auto-Discovery                        │  │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐  │  │
-│  │  │competence│ │log_parser│ │jira     │ │ doc_search (NEW) │  │  │
-│  │  └──────────┘ └──────────┘ └──────────┘ └───────┬──────────┘  │  │
-│  └────────────────────────────────────────────────┼───────────────┘  │
-│                                                    │                  │
-├────────────────────────────────────────────────────┼──────────────────┤
-│                    API Routes (/api/doc_search/*)  │                  │
-│                                                    ↓                  │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │                  DocSearchPlugin Instance                        │ │
-│  │  ┌───────────────┐ ┌───────────────┐ ┌──────────────────────┐   │ │
-│  │  │ Sync Engine    │ │ Search Engine │ │ Preview / Extraction │   │ │
-│  │  │ (asyncio task) │ │ (FTS5 query)  │ │ (format-specific)    │   │ │
-│  │  └───────┬───────┘ └───────┬───────┘ └──────────┬───────────┘   │ │
-│  │          │                 │                     │               │ │
-│  │          └─────────┬───────┴─────────────────────┘               │ │
-│  │                    ↓                                              │ │
-│  │  ┌─────────────────────────────────────────────────────────────┐ │ │
-│  │  │              SQLite FTS5 Index + Metadata                    │ │ │
-│  │  │  app/plugins/doc_search_index.db (WAL mode)                  │ │ │
-│  │  └─────────────────────────────────────────────────────────────┘ │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────┐
-│                         File System                                   │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐          │
-│  │ Repo A (git)   │  │ Repo B (git)   │  │ Repo C (git)   │          │
-│  │ .docx .pdf .rst│  │ .doc .drawio   │  │ .graphml .pdf  │          │
-│  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘          │
-│          │                   │                    │                   │
-│          └───────────────────┼────────────────────┘                   │
-│                              ↓                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │              Text Extraction Pipeline (module)                    │ │
-│  │  python-docx → PyPDF2 → textract → extract text from all formats │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────┐
-│                         Frontend (SPA)                                 │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  app/static/js/doc_search.js (Vanilla JS + core.js)              │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────────────┐  │ │
-│  │  │ SearchBar│ │ Results  │ │ Preview  │ │ Sync Button+Status│  │ │
-│  │  │ (input)  │ │ (table)  │ │ (iframe) │ │ (button+text)     │  │ │
-│  │  └──────────┘ └──────────┘ └──────────┘ └───────────────────┘  │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-│                                                                       │
-│  Imported in app.js:  import "./doc_search.js"  (1-line addition)     │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-## Component Responsibilities
-
-| Component | Responsibility | Implementation |
-|-----------|---------------|----------------|
-| **DocSearchPlugin** | Plugin lifecycle, route registration, state management | `app/plugins/doc_search.py` (~400 lines) |
-| **Text Extraction Module** | Format-specific text extraction from 6+ formats | `app/plugins/doc_extraction.py` (~150 lines, separate module imported by plugin) |
-| **Sync Engine** | Git pull → traverse files → extract text → upsert FTS5 | `_sync_job()` coroutine in `doc_search.py`, run via `asyncio.create_task()` |
-| **Search Engine** | Full-text FTS5 queries with snippet generation | SQLite FTS5 virtual table, `snippet()` function for highlighting |
-| **Preview Service** | Extract text from specific file, highlight terms, return HTML | `GET /api/doc_search/preview/{repo_id}/{file_path}` |
-| **FTS5 Index** | Indexed content storage, repo metadata, sync state | `app/plugins/doc_search_index.db` (WAL mode) |
-| **Frontend SPA** | Search input, result table, preview panel, sync UI | `app/static/js/doc_search.js` (~300 lines, Vanilla JS + core.js) |
-| **Config** | Repo paths, sync schedule preferences | `toolkit_settings.json` via `app.config` |
-
-## Plugin Structure
-
-### New Files (all new, zero existing code modified)
-
-```
-app/
-├── plugins/
-│   ├── doc_search.py           # Plugin class + sync engine + search API
-│   └── doc_extraction.py       # Text extraction from .docx/.pdf/.doc/.rst/.drawio/.graphml
-├── static/
-│   └── js/
-│       └── doc_search.js       # Frontend SPA (search UI + sync button + preview)
-```
-
-### Modified Files (minimal touch — only registration lines)
-
-```
-app/
-└── static/
-    └── js/
-        └── app.js              # Add: import "./doc_search.js";
-```
-
-**Nothing else modified.** No changes to `main.py`, `config.py`, `base.py`, `__init__.py`, or any existing plugin.
-
-### Why Extraction Is a Separate Module
-
-The text extraction logic is isolated from the plugin class for three reasons:
-1. **Testability** — extraction functions can be unit-tested without FastAPI context
-2. **Internal API clarity** — the plugin class focuses on orchestration (sync, search, serve), extraction is a pure function call
-3. **Size** — 6+ formats each require their own `try/except` extraction logic; keeping them in the plugin file would blow it past 800+ lines
-
-The extraction module exports a simple function signature:
-```python
-# doc_extraction.py
-def extract_text(file_path: str, mime_type: str | None = None) -> str:
-    """Extract plain text from a documentation file. Returns empty string on failure."""
-    ...
-```
-
-## Data Flow
-
-### 1. Sync Flow (Git Pull → Index)
-
-```
-POST /api/doc_search/sync
-        │
-        ▼
-asyncio.create_task(_sync_job())
-        │
-        ├── 1. For each configured repo:
-        │       git pull (subprocess)
-        │
-        ├── 2. Walk repo directory tree
-        │       Find files matching: *.docx, *.pdf, *.doc, *.rst, *.drawio, *.graphml
-        │       Skip files already indexed (via file_hash)
-        │
-        ├── 3. For each new/changed file:
-        │       extract_text(file_path) → plain text
-        │
-        ├── 4. Upsert into SQLite FTS5:
-        │       INSERT OR REPLACE into fts_index + metadata table
-        │       Update sync_state (file_hash, last_synced timestamps)
-        │
-        └── 5. Update sync_state.sync_progress per step
-                POST /api/doc_search/sync/status returns progress JSON
-```
-
-### 2. Search Flow
-
-```
-GET /api/doc_search/search?q=full+text+search&repo_id=all&limit=50
-        │
-        ▼
-FTS5 MATCH query with snippet() function:
-    SELECT repo_id, relative_path, title, snippet(doc_search_fts, 1, '<mark>', '</mark>', '...', 40)
-    FROM doc_search_fts
-    WHERE doc_search_fts MATCH ?
-    ORDER BY rank
-    LIMIT ?
-        │
-        ▼
-JSON response:
-    [ { repo_id, path, title, snippet: "...<mark>search</mark>...", score } ]
-```
-
-### 3. Preview Flow
-
-```
-GET /api/doc_search/preview/{repo_id}/{file_path}?q=search+terms
-        │
-        ├── 1. Read file from disk (repo_id → local path)
-        ├── 2. extract_text(file_path) → plain text
-        ├── 3. Find query terms in text, extract surrounding context
-        ├── 4. Generate HTML with <mark> highlights
-        │
-        └── HTMLResponse with preview + term highlighting
-```
-
-### 4. Frontend Data Flow
-
-```
-[User types in search input]
-    │
-    ▼
-debounce 300ms → api("/api/doc_search/search?q=...")
-    │
-    ▼
-Render results table with snippet column
-    │
-    ▼ (user clicks result row)
-api("/api/doc_search/preview/{repo}/{path}?q=...")
-    │
-    ▼
-Render preview in iframe/div with syntax highlighting
-```
-
-## API Design
-
-All endpoints follow the existing competence plugin pattern: prefix `/api/{plugin.id}/`.
-
-| Endpoint | Method | Purpose | Example Response |
-|----------|--------|---------|-----------------|
-| `/api/doc_search/search` | GET | Full-text search with snippets | `[{repo_id, path, title, snippet, score}]` |
-| `/api/doc_search/sync` | POST | Trigger git pull + re-index (async) | `{status: "sync_started"}` |
-| `/api/doc_search/sync/status` | GET | Current sync progress | `{in_progress, progress: {phase, done, total}}` |
-| `/api/doc_search/preview/{repo_id}/{path:path}` | GET | File preview with term highlighting | HTML response (like competence chart) |
-| `/api/doc_search/repos` | GET | List configured repos + stats | `[{id, name, path, file_count, last_synced}]` |
-
-### Why These Endpoints
-
-- **search** — core value proposition; required by frontend
-- **sync** — manual trigger, follows `POST /api/competence/sync` pattern exactly
-- **sync/status** — progress polling, identical pattern to competence
-- **preview** — differentiator feature (competitor parity); `HTMLResponse` like competence chart
-- **repos** — frontend needs repo names/labels for display and filtering
-
-### Query Parameters for `/search`
-
-| Param | Type | Default | Description |
-|-------|------|---------|-------------|
-| `q` | str | *required* | Search query (FTS5 syntax) |
-| `repo_id` | str | `"all"` | Filter to specific repo |
-| `limit` | int | `50` | Max results |
-| `offset` | int | `0` | Pagination offset |
-
-## Search Index Strategy
-
-### Why SQLite FTS5 (not Whoosh)
-
-1. **Zero additional dependencies** — SQLite is already in the stack; FTS5 is built-in since Python 3.9
-2. **In-process** — no separate service to manage; co-located with plugin DB
-3. **Proven pattern** — competence plugin already uses SQLite in `app/plugins/`
-4. **WAL mode support** — readers don't block writers; search queries run concurrent with sync
-5. **`snippet()` function** — built-in match highlighting, no custom logic needed
-6. **~3000 files is trivial** — FTS5 handles 100K+ documents effortlessly
-
-### Schema
-
-```sql
--- Sync state (follows competence pattern)
-CREATE TABLE IF NOT EXISTS sync_state (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-
--- Repo configuration
-CREATE TABLE IF NOT EXISTS repos (
-    id       TEXT PRIMARY KEY,        -- short name: "firmware", "hardware", "manuals"
-    name     TEXT NOT NULL,           -- display name
-    path     TEXT NOT NULL,           -- local filesystem path
-    enabled  INTEGER NOT NULL DEFAULT 1
-);
-
--- File metadata (fast lookup for changed files)
-CREATE TABLE IF NOT EXISTS file_index (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    repo_id       TEXT NOT NULL REFERENCES repos(id),
-    relative_path TEXT NOT NULL,
-    title         TEXT NOT NULL DEFAULT '',       -- derived from filename
-    mime_type     TEXT NOT NULL DEFAULT '',
-    file_hash     TEXT NOT NULL DEFAULT '',       -- SHA-256 of file content
-    file_size     INTEGER NOT NULL DEFAULT 0,
-    last_modified TEXT NOT NULL,                  -- from filesystem
-    indexed_at    TEXT NOT NULL,                  -- when this entry was created
-    UNIQUE(repo_id, relative_path)
-);
-
--- FTS5 virtual table (content search + snippets)
-CREATE VIRTUAL TABLE IF NOT EXISTS doc_search_fts USING fts5(
-    repo_id,          -- tokenized for filtering
-    relative_path,    -- unindexed (column marked UNINDEXED)
-    title,            -- weighted column
-    content,          -- main search body
-    content_rowid='id',
-    tokenize='porter unicode61'
-);
-
--- Index for fast repo+path lookups
-CREATE INDEX IF NOT EXISTS idx_file_repo_path ON file_index(repo_id, relative_path);
-```
-
-### Why This Schema
-
-- **`repos` table** — stores repo configuration in-DB rather than only in config, allows dynamic repo management later without config file editing
-- **`file_index` table** — stores file metadata separately from FTS5 content; enables change detection via `file_hash` without re-extracting text
-- **`doc_search_fts` virtual table** — FTS5 handles tokenization, ranking, snippet generation; `content` column carries the full extracted text
-- **`UNIQUE(repo_id, relative_path)`** — prevents duplicate entries per file; combined with `INSERT OR REPLACE` for upserts
-- **`threading.Lock()` for writes** — follows competence plugin's `_db_lock` pattern
-
-### Incremental vs Full Re-Index
-
-| Trigger | Strategy |
-|---------|----------|
-| First run (no `last_sync`) | Full walk + extract + index all files |
-| Subsequent sync | Walk repo, compare file_hash with stored hash; only re-extract changed/new files |
-| File deleted from repo | Entry in `file_index` not found during walk → DELETE from both tables |
-| Manual "full reindex" | API param `full=true` → DELETE all rows for that repo → full walk |
-
-**File hash** is SHA-256 of content bytes; computed before extraction to avoid re-extracting unchanged files.
-
-## Sync Strategy
-
-### When Sync Runs
-
-| Trigger | Mechanism | Pattern From |
-|---------|-----------|-------------|
-| App startup | `startup()` calls `asyncio.get_running_loop().create_task(_sync_job())` | New (competence doesn't auto-sync) |
-| Manual button (API) | `POST /api/doc_search/sync` → `asyncio.create_task(_sync_job())` | `competence_sync()` |
-| Scheduled (future) | Optional `asyncio` periodic task; not in MVP | New |
-
-### startup() Design
-
-```python
-def startup(self) -> None:
-    """Initialize DB schema and kick off initial git pull."""
-    self._init_db()
-    # Auto-sync on startup so search works immediately
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_sync_job(full=False))
-    except RuntimeError:
-        pass  # No event loop yet — will sync on first manual trigger
-```
-
-### Sync Progress Reporting
-
-Follows competence plugin pattern: `sync_progress` key in `sync_state` with JSON:
-```json
-{"phase": "git_pull", "repo": "firmware", "done": 1, "total": 3}
-{"phase": "scanning",   "repo": "firmware", "found": 1500}
-{"phase": "extracting", "repo": "firmware", "done": 342, "total": 1500}
-{"phase": "indexing",   "repo": "firmware", "done": 342, "total": 1500}
-```
-
-### Shutdown
-
-```python
-def shutdown(self) -> None:
-    """Nothing to clean up — all state is in SQLite."""
-    pass
-```
-
-Unlike competence plugin (which has to close httpx clients), the doc search plugin has no persistent network connections to clean up.
-
-## Frontend Integration
-
-### How JS Talks to Plugin API
-
-Exactly like competence.js:
-1. **Import core.js**: `import { h, api, toast, registerPlugin, icons, createTable } from "./core.js";`
-2. **Call `registerPlugin()`**: with `{ id, name, order, svgIcon, init(container), destroy() }`
-3. **Use `api()` helper**: for all fetch calls — handles errors, JSON parsing, toast on failure
-4. **Use `h()` builder**: for DOM construction
-5. **No framework**: pure Vanilla JS, no build step, served as ES module from `/static/js/`
-
-### Registration Pattern
-
-```javascript
-// doc_search.js
-import { h, api, toast, registerPlugin, icons, createTable } from "./core.js";
-
-registerPlugin({
-  id: "doc_search",
-  name: "Doc Search",
-  order: 50,
-  svgIcon: icons.search,
-
-  _query: "",
-  _repoId: "all",
-  _debounceTimer: null,
-
-  init(container) {
-    this._render(container);
-  },
-
-  destroy() {
-    // Clean up any timers, event listeners
-    if (this._debounceTimer) clearTimeout(this._debounceTimer);
-  },
-
-  _render(c) { /* search bar + results + preview layout */ },
-
-  async _doSearch(q) { /* debounced search call */ },
-
-  async _showPreview(repo, path) { /* load preview into iframe/div */ },
-});
-```
-
-### app.js Modification (1 line)
-
-```javascript
-// app.js — add import
-import "./doc_search.js";
-```
-
-## Integration Points
-
-### Internal Boundaries
-
-| Boundary | Pattern | Notes |
-|----------|---------|-------|
-| Plugin ↔ FastAPI | `register_routes(app)` decorates `app` with `@app.get(...)` | No return value; side-effect only |
-| Plugin ↔ Config | `app.config.load()` reads `toolkit_settings.json` | Read-only at sync time; add `doc_repos` key to config |
-| Plugin ↔ Filesystem | `git pull` via `subprocess.run()`, file walking via `os.walk()` | Sync-only operation |
-| Plugin ↔ SQLite | Same connection pattern as competence: open/close per operation, `check_same_thread=False`, WAL mode | Threading lock for writes |
-| extraction module ↔ Plugin | `extract_text(path, mime_type) → str` | Pure function, no side effects, import-only |
-| Frontend ↔ API | `fetch("/api/doc_search/*")` via `api()` helper | ES module import; no CORS needed (same origin) |
-
-### Config Integration
-
-Add to `toolkit_settings.json`:
-```json
-{
-    "doc_repos": [
-        {
-            "id": "firmware",
-            "name": "Firmware Docs",
-            "path": "C:/docs/firmware-repo",
-            "enabled": true
-        },
-        {
-            "id": "hardware", 
-            "name": "Hardware Specs",
-            "path": "C:/docs/hardware-repo",
-            "enabled": true
-        },
-        {
-            "id": "manuals",
-            "name": "User Manuals", 
-            "path": "C:/docs/manuals-repo",
-            "enabled": true
-        }
-    ]
-}
-```
-
-Config is read at sync time; repos table is synced from config on startup.
-
-### External Dependencies
-
-| Dependency | Purpose | Install |
-|------------|---------|---------|
-| `python-docx` | Extract text from .docx files | `pip install python-docx` |
-| `PyPDF2` or `pdfplumber` | Extract text from .pdf files | `pip install pdfplumber` |
-| `textract` or custom parser | Extract text from .doc (legacy) | `pip install textract` |
-| `rst` parsing | .rst files are plain text; `open().read()` works | No dependency |
-| `.drawio` / `.graphml` | XML-based; extract text from XML tags | No dependency (stdlib `xml.etree`) |
-| `git` | CLI tool for `git pull` | Already on system (existing tool infrastructure) |
-
-## Suggested Build Order
-
-### Phase 1: Backend Core (search + extraction + index) — Blocks Phase 2
-
-**Rationale:** Frontend can't be built until API endpoints exist. Extraction is the most complex and error-prone piece — start early.
-
-**Build order within Phase 1:**
-1. `doc_extraction.py` — write and test extraction for all 6 formats
-2. `doc_search.py` — plugin class, DB schema, FTS5 index creation in `register_routes()`
-3. `POST /api/doc_search/sync` — git pull + walk + extract + index
-4. `GET /api/doc_search/search?q=...` — FTS5 query with snippets
-5. `GET /api/doc_search/sync/status` — progress reporting
-6. `GET /api/doc_search/preview/{repo_id}/{path}` — file preview
-7. `GET /api/doc_search/repos` — repo listing
-8. Manual smoke test: `curl` sync → search → preview
-
-### Phase 2: Frontend SPA — Depends on Phase 1
-
-**Rationale:** Needs Phase 1 API. Frontend is straightforward vanilla JS following competence.js patterns.
-
-**Build order within Phase 2:**
-1. `doc_search.js` — plugin registration + `init()` layout
-2. Search bar with debounce → results table with snippets
-3. Row click → preview panel (iframe with highlight HTML)
-4. Sync button + status polling (identical pattern to competence.js `_doSync()`)
-5. Repo filter dropdown
-6. `app.js` — add `import "./doc_search.js";`
-7. Manual smoke test: search → click → preview → sync button
-
-### Why Not Parallel?
-
-Backend and frontend *could* be built in parallel if:
-- API contract is specified upfront
-- Frontend developer mocks API responses
-
-But in this codebase pattern, the same implementor does both (single-file plugin + single JS file). Building backend-first means the frontend can be tested against real data immediately.
-
-### Phase 3: Polish (Optional)
-
-- Autocomplete/suggestions from FTS5
-- Search term highlighting in results list
-- "Open in external viewer" button in preview
-- Scheduled background sync (cron-style)
-- Fuzzy search fallback for typos
-
-## Patterns to Follow
-
-### Pattern 1: Module-Level State + Locking (from competence.py)
-```python
-_db_lock = threading.Lock()
-_http_client: httpx.AsyncClient | None = None
-
-def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-```
-**Why:** Competence plugin proves this works for concurrent sync + reads. FTS5 queries are reads (no lock needed in WAL mode), only writes need the lock.
-
-### Pattern 2: Async Background Task (from competence.py)
-```python
-@router.post("/sync")
-async def trigger_sync():
-    if await _db_get_async("in_progress") == "1":
-        return {"status": "sync_already_running"}
-    asyncio.create_task(_sync_job())
-    return {"status": "sync_started"}
-```
-**Why:** Long-running sync (3000 files × extraction) must not block the request. Progress tracked in `sync_state` table, polled by status endpoint.
-
-### Pattern 3: HTMLResponse for Previews (from competence.py chart)
-```python
-@app.get("/api/doc_search/preview/{repo_id}/{path:path}", response_class=HTMLResponse)
-async def preview(repo_id: str, path: str, q: str = ""):
-    text = extract_text(full_path)
-    html = _highlight_terms(text, q.split())
-    return f"<html><body>{html}</body></html>"
-```
-**Why:** Returns self-contained HTML, consumed by frontend iframe. No separate rendering logic needed in JS. Same pattern as Plotly charts in competence.
-
-### Pattern 4: Simple `extract_text()` Dispatch
-```python
-# doc_extraction.py
-def extract_text(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
-    extractor = _EXTRACTORS.get(ext)
-    if not extractor:
-        logger.warning(f"No extractor for {ext}, trying as plain text")
-        return _extract_plain(file_path)
-    try:
-        return extractor(file_path)
-    except Exception as e:
-        logger.warning(f"Extraction failed for {file_path}: {e}")
-        return ""
-
-_EXTRACTORS = {
-    ".docx": _extract_docx,
-    ".pdf":  _extract_pdf,
-    ".doc":  _extract_doc,
-    ".rst":  _extract_plain,  # reStructuredText is plain text
-    ".drawio": _extract_xml,
-    ".graphml": _extract_xml,
-    ".txt":  _extract_plain,
-    ".md":   _extract_plain,
-}
-```
-**Why:** Extensible — adding a format is one function + one dict entry. Failures are logged but don't crash the sync.
-
-## Anti-Patterns to Avoid
-
-### Anti-Pattern 1: Blocking Sync in Request Handler
-**What people do:** `await _sync_job()` inside the POST handler, making the client wait 10+ minutes
-**Why it's wrong:** HTTP timeout, blocked event loop, terrible UX
-**Do this instead:** `asyncio.create_task(_sync_job())` — return immediately, poll status
-
-### Anti-Pattern 2: Single Monolithic `doc_search.py`
-**What people do:** Put extraction, sync, search, and preview all in one 1500-line file
-**Why it's wrong:** Hard to test, hard to read, extraction testing requires FastAPI context
-**Do this instead:** Separate `doc_extraction.py` module — pure functions, zero dependencies on plugin framework
-
-### Anti-Pattern 3: Full Re-Index Every Sync
-**What people do:** Delete all FTS5 rows, re-extract all 3000 files, re-insert
-**Why it's wrong:** Unnecessary I/O, 10+ minute sync for 1 changed file
-**Do this instead:** Compare file hashes in `file_index` table; only re-extract changed/new files
-
-### Anti-Pattern 4: Loading All Files Into Memory
-**What people do:** Read all 3000 files into a list, extract all, then insert
-**Why it's wrong:** Memory spike; sync crash on large repos
-**Do this instead:** Stream — walk files, extract one at a time, insert immediately, report progress
-
-### Anti-Pattern 5: Mixing Extraction Errors with Sync Failures
-**What people do:** One bad .doc file crashes the entire sync
-**Why it's wrong:** 1 corrupt file blocks indexing 2999 good files
-**Do this instead:** Extract inside `try/except`; log warning, skip file, continue sync. Report skipped-files count in sync status.
-
-## Sources
-
-- **Existing codebase** (verified by reading source): `app/plugins/competence.py`, `app/plugins/base.py`, `app/main.py`, `app/config.py`, `app/static/js/core.js`, `app/static/js/competence.js`, `app/static/js/app.js`
-- **SQLite FTS5 Documentation**: https://www.sqlite.org/fts5.html (built-in since Python 3.9, `snippet()` function for highlighting)
-- **PROJECT.md**: Milestone M3 specification — git sync, text extraction, search, preview
+# Architecture Research
+
+**Domain:** Internal Jira analytics plugin rework (FastAPI + vanilla-JS SPA) — local SQLite read-through cache, persistent-tab UI, browser notifications, insights engine
+**Researched:** 2026-07-13
+**Confidence:** HIGH (integration points derived directly from the existing codebase: `jira_tracker.py`, `jira.js`, `core.js`, `doc_search.py`, `base.py`, `PROJECT.md`)
 
 ---
 
-*Architecture research for: Documentation Search Engine Plugin*
-*Researched: 2026-07-01*
-*All claims verified against existing codebase patterns*
+## Standard Architecture
+
+### System Overview
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  Browser (vanilla-JS SPA, jira.js)                                        │
+│                                                                           │
+│  ┌──────────────── sidebar / tab-bar ────────────────┐                   │
+│  │ Weekly │ Assigned │ Insights │ Config            │  ← tabs keep DOM   │
+│  └───────────────────────┬──────────────────────────┘     alive (toggle) │
+│                          │  read from shared in-memory store             │
+│                  ┌───────▼────────┐                                       │
+│                  │ this._store    │  Map<week, payload>, insights, cfg    │
+│                  └───────┬────────┘                                       │
+└──────────────────────────┼──────────────────────────────────────────────┘
+                           │  fetch() (structured JSON + "stale" flag)
+                           ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│  FastAPI — app/plugins/jira_tracker.py  (routes + Jira read path)         │
+│                                                                           │
+│   /api/jira/worklogs/weekly  ──┐                                           │
+│   /api/jira/assigned          │  read-through orchestration              │
+│   /api/jira/insights          │                                           │
+│   POST/PUT/DELETE /worklog ───┴─► forces invalidation in store           │
+│                          │                                                │
+│                          ▼  (imports)                                     │
+│   app/plugins/jira_store.py  ── NEW persistence module                    │
+│     • _get_db()  WAL, row_factory                          │              │
+│     • get_worklogs()  read-through (TTL + stale-serve)     │              │
+│     • upsert_worklogs() / mark_stale()                     │              │
+│     • compute_insights()  (pure, on stored rows)          │              │
+│                          │                                                │
+│            blocking I/O via asyncio.to_thread()  (Windows-safe)           │
+│                          │                                                │
+│              ┌───────────▼────────────┐    ┌──────────────────────────┐  │
+│              │ jira_tracker.db (WAL)  │    │ Jira Cloud REST API      │  │
+│              │ worklogs               │    │ (authoritative source)   │  │
+│              │ assigned_tickets       │◄───┤ search_issues + per-issue │  │
+│              │ cache_meta             │    │ /worklog                 │  │
+│              │ non_working_days       │    └──────────────────────────┘  │
+│              └────────────────────────┘                                  │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key principle (from `PROJECT.md`):** Jira is authoritative; the local DB is a *read-only mirror*. We never write business data to SQLite that didn't come from Jira. The one exception is `non_working_days` (user annotations) which is local-only metadata used by the insights engine.
+
+### Component Responsibilities
+
+| Component | Responsibility | Typical Implementation |
+|-----------|----------------|------------------------|
+| `jira_tracker.py` | Route handlers + Jira read path (`_fetch_worklogs_for_user`, `_api`, `_jira`) | Unchanged fetch logic; now delegates persistence to `jira_store` |
+| `jira_store.py` (**NEW**) | SQLite schema, read-through cache, insights computation, non-working-days | Mirror of `doc_search.py`'s DB pattern (`_get_db`, `_db_lock`, `_ensure_schema`) |
+| `jira.js` | Persistent sidebar/tab UI + shared in-memory `this._store` | Replace `createTabs` re-render with show/hide + dirty flags |
+| `core.js` | Tab helper + NEW `setPluginBadge(id, n)` nav hook | Minor additive change only |
+| `jira_tracker.db` | Durable mirror + insights metadata | Per-plugin file in `app/plugins/`, WAL |
+
+---
+
+## Recommended Project Structure
+
+```
+app/plugins/
+├── jira_tracker.py        # MODIFIED: routes delegate to jira_store; keeps Jira fetch logic
+├── jira_store.py          # NEW: schema, read-through, insights, non_working_days
+├── doc_search.py          # reference pattern (do not touch)
+└── base.py                # unchanged
+
+app/static/js/
+├── jira.js                # MODIFIED: persistent layout + this._store
+└── core.js                # MODIFIED (small): add setPluginBadge()
+
+.planning/research/
+└── ARCHITECTURE.md        # this file
+```
+
+### Structure Rationale
+
+- **`jira_store.py` as a separate module** mirrors the existing split in this repo (`doc_search.py` owns schema; `doc_extraction.py` owns parsing). Keeping the Jira *fetch* in `jira_tracker.py` but the *persistence + analytics* in `jira_store.py` preserves the convention and keeps each file focused. It also makes the cache independently testable.
+- **DB co-located in `app/plugins/`** exactly like `DB_PATH = os.path.join(os.path.dirname(__file__), "doc_search.db")` — no new config path needed.
+- **No framework change on the frontend** — vanilla JS, `h()`/`api()` helpers, additive `core.js` helper only.
+
+---
+
+## Architectural Patterns
+
+### Pattern 1: Read-Through Cache with TTL + Stale-Serve
+
+**What:** `get_worklogs(account_id, d_from, d_to)` checks the SQLite store first. If a fresh (within TTL) complete copy exists, it returns rows with no Jira call. Otherwise it fetches from Jira, persists, and returns. On Jira failure it serves the stale persisted rows and flags `stale: true` instead of erroring.
+
+**When to use:** Any time the upstream (Jira) is slow/rate-limited and we want instant reloads + restart survival. This is the core of the "instant" goal.
+
+**Trade-offs:** Slightly more storage + a refresh/invalidation bookkeeping table (`cache_meta`). Worth it — eliminates the per-process in-memory loss on restart and the re-fetch-on-every-tab-open.
+
+**Example (sketch in `jira_store.py`):**
+```python
+def get_worklogs(account_id, d_from, d_to, force=False):
+    week_start = _monday(d_from)
+    meta = _cache_meta_get(account_id, week_start)
+    fresh = meta and not force and (now() - meta["fetched_at"] < TTL)
+    if fresh and meta["complete"]:
+        return _rows_for_week(account_id, week_start), {"cached": True, "stale": False}
+    try:
+        rows = _fetch_worklogs_for_user(account_id, d_from, d_to)  # from jira_tracker
+        _upsert_worklogs(account_id, rows)
+        _cache_meta_set(account_id, week_start, complete=True)
+        return rows, {"cached": False, "stale": False}
+    except JIRAError:
+        if meta:                       # graceful degradation
+            return _rows_for_week(account_id, week_start), {"cached": True, "stale": True}
+        raise
+```
+
+### Pattern 2: Persistent Tab Bodies via DOM Toggle (not re-render)
+
+**What:** The current `createTabs` (core.js:168) does `body.innerHTML = ""` on every `activate()` — that destroys the DOM and forces the render callback (which re-fetches). Replace with: build each view's root element **once** in `init()`, keep all of them in the DOM, and switch visibility with `el.style.display`. Re-activation only toggles `display`.
+
+**When to use:** Any SPA where tab content is expensive to rebuild and you want instant switching. Exactly the M4 "seamless transitions" requirement.
+
+**Trade-offs:** Slightly more DOM resident in memory (trivial for 4 tabs). Requires a "dirty" flag so data-affecting actions (log work, refresh) still re-render the relevant view. This is the correct trade for this app.
+
+**Example (sketch in `jira.js`):**
+```js
+init(container) {
+  this._store = { weekly: new Map(), insights: null, cfg: null, dirty: {wk:true, asg:true, ins:true} };
+  this._views = {
+    wk:   this._mountWeekly(container),
+    asg:  this._mountAssigned(container),
+    ins:  this._mountInsights(container),
+    cfg:  this._mountConfig(container),
+  };
+  this._sidebar(container, ["wk","asg","ins","cfg"], id => this._show(id));
+  this._show("wk");
+  this._startAutoRefresh();          // one interval for the whole plugin
+}
+_show(id){ for (const k in this._views) this._views[k].style.display = (k===id)?"":"none"; }
+// re-render only when this._store.dirty[k] is true (e.g. after logging work)
+```
+
+> **Alternative considered (and rejected for M4 scope):** Extend `createTabs` in `core.js` with a `{persist:true}` mode so *all* plugins benefit. Cleaner long-term, but it's a shared-core change with blast radius across every plugin and the question only asks for the Jira rework. Recommend the local jira.js approach now; promote to `core.js` later if another plugin needs it. If we do promote, the change is purely additive (`createTabs(container, tabs, {persist})`) and non-breaking.
+
+### Pattern 3: Insights as a Pure Function over the Mirror
+
+**What:** `compute_insights(worklogs, non_working_days, daily_target=8h)` is a pure, dependency-free function that runs entirely on rows already in SQLite — no Jira call. It returns structured gaps. The backend exposes it via `/api/jira/insights`; the nav badge and browser notification are driven by its output.
+
+**When to use:** Any "analytics over cached data" feature. Keeps the expensive network call out of the insight path and makes the badge/notification cheap to recompute on a timer.
+
+**Example:** see `compute_insights` math below.
+
+### Pattern 4: In-Flight Fetch Guard (anti-thundering-herd)
+
+**What:** Because a week fetch hits Jira N times (search + one `/worklog` call per issue), concurrent requests for the same week must not each trigger a full fetch. Guard the read-through with a per-cache-key lock / in-flight future.
+
+**When to use:** Read-through caches where the fill operation is expensive and can be triggered by multiple users/tabs at once.
+
+**Example:**
+```python
+_inflight: dict[str, asyncio.Future] = {}
+async def get_worklogs_async(account_id, d_from, d_to, force=False):
+    key = f"{account_id}|{_monday(d_from)}"
+    if key in _inflight and not force:
+        return await _inflight[key]
+    fut = asyncio.get_event_loop().create_future()
+    _inflight[key] = fut
+    try:
+        res = await asyncio.to_thread(get_worklogs, account_id, d_from, d_to, force)
+        fut.set_result(res)
+    finally:
+        _inflight.pop(key, None)
+    return res
+```
+
+---
+
+## Data Flow
+
+### Request Flow (weekly worklogs — the hot path)
+
+```
+User clicks "Weekly" tab (first time)
+   ↓  (dirty flag set)
+jira.js _show("wk") → reads this._store.weekly.get(weekKey)
+   ↓  miss
+api("/api/jira/worklogs/weekly?week_of=...")
+   ↓
+jira_tracker.py route → jira_store.get_worklogs()  [read-through]
+   ↓  cache miss
+Jira Cloud: search_issues + per-issue /worklog
+   ↓
+jira_store.upsert_worklogs() + cache_meta   ← persisted to jira_tracker.db (WAL)
+   ↓
+returns rows + {cached:false}
+   ↓
+jira.js renders table, stores payload in this._store.weekly (dirty=false)
+
+User switches to Assigned, then back to Weekly
+   ↓  (no API call — this._store has it; DOM never destroyed)
+jira.js _show("wk") → display toggled, payload already in memory
+```
+
+### Invalidation Flow (after logging work)
+
+```
+POST /api/jira/worklog  (jira_tracker.py)
+   ↓  success
+jira_store.mark_stale(account_id, affected_weeks)   # clears cache_meta + deletes rows
+jira.js: optimistic update of this._store + set dirty.wk = true
+   ↓  next weekly view render (or auto-refresh) re-reads → cache miss → fresh Jira fetch
+```
+
+### Notification / Badge Flow
+
+```
+Auto-refresh timer (or manual refresh) completes
+   ↓
+api("/api/jira/insights/summary")  → { gap_count, missed_days, short_weeks }
+   ↓  gap_count > 0
+core.setPluginBadge("jira", gap_count)   ← red dot/number on the nav button
+if Notification.permission === "granted":
+    new Notification("Jira: 2 days missing hours", {...})
+else: in-app toast (always works) + Insights tab badge
+```
+
+### Key Data Flows
+
+1. **Mirror sync:** Jira → SQLite (write path only on cache miss / force).
+2. **Read path:** SQLite → API → in-memory store → DOM (no Jira hit when warm).
+3. **Insight computation:** SQLite rows → pure function → badge/notification.
+4. **Cross-session:** on app restart or plugin re-entry, SQLite serves instantly; only expired TTL triggers a Jira fetch.
+
+---
+
+## SQLite Schema (proposed for `jira_store.py`)
+
+Mirror `doc_search.py`: `DB_PATH = os.path.join(os.path.dirname(__file__), "jira_tracker.db")`, `SCHEMA_VERSION = "1"`, `_get_db()` opens with `PRAGMA journal_mode=WAL`, `_db_lock = threading.Lock()`, all writes via `asyncio.to_thread`.
+
+```sql
+CREATE TABLE IF NOT EXISTS worklogs (
+    id               TEXT    NOT NULL,        -- Jira worklog id
+    account_id       TEXT    NOT NULL,
+    issue_key        TEXT    NOT NULL,
+    issue_summary    TEXT    NOT NULL DEFAULT '',
+    date             TEXT    NOT NULL,        -- YYYY-MM-DD
+    started          TEXT    NOT NULL DEFAULT '',
+    time_spent_seconds INTEGER NOT NULL DEFAULT 0,
+    comment          TEXT    NOT NULL DEFAULT '',
+    week_start       TEXT    NOT NULL,        -- derived Monday, for insights queries
+    fetched_at       TEXT    NOT NULL,
+    PRIMARY KEY (account_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_wl_week ON worklogs(account_id, week_start);
+CREATE INDEX IF NOT EXISTS idx_wl_date ON worklogs(account_id, date);
+
+CREATE TABLE IF NOT EXISTS assigned_tickets (
+    key             TEXT PRIMARY KEY,
+    summary         TEXT,
+    status          TEXT,
+    priority        TEXT,
+    attachment_count INTEGER,
+    has_folder      INTEGER,
+    local_files     INTEGER,
+    fetched_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cache_meta (
+    account_id   TEXT NOT NULL,
+    week_start   TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL,
+    complete     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (account_id, week_start)
+);
+
+CREATE TABLE IF NOT EXISTS non_working_days (
+    date    TEXT PRIMARY KEY,   -- YYYY-MM-DD
+    reason  TEXT NOT NULL DEFAULT ''
+);
+-- Note: weekends are derived at query time, not stored, unless user explicitly marks one.
+```
+
+**Why these tables:**
+- `worklogs` keyed by `(account_id, id)` → upsert is idempotent, supports teammates, and `week_start` makes insights queries O(indexed) instead of scanning.
+- `cache_meta` decouples "is the week fresh?" from the row data so read-through + stale-serve + invalidation are trivial.
+- `non_working_days` is the *only* locally-authored table (user annotations). Everything else is a Jira mirror.
+
+---
+
+## Insights Engine — "days missing hours" & "week below target"
+
+### Definitions
+
+- **Working day:** Mon–Fri **minus** any `non_working_days` entry in that range (weekends excluded by default; a user may also mark a Saturday as working, but the default target math only adjusts *weekdays*).
+- **Day "missing hours":** day is a working day AND `logged_seconds == 0`. (Optionally a softer "low hours" tier for `0 < secs < MIN_DAILY`, e.g. 4h — surface separately, don't count as a hard gap.)
+- **Day "low hours":** working day with `0 < secs < DAILY_MIN` (e.g. 4h). Informational.
+- **Weekly target:** `target_seconds = DAILY_TARGET(8h) * working_days_in_week`, where `working_days_in_week = number of Mon–Fri in the week that are NOT in non_working_days`.
+  - Default 5-day week → 40h.
+  - One weekday holiday (e.g. Friday off) → 4 × 8h = **32h**.
+  - Two holidays → 24h. This is the "recalculates the 40h target" requirement.
+- **Week below target:** `sum(logged_seconds for the week) < target_seconds`.
+
+### Algorithm (pure function)
+
+```python
+def compute_insights(rows, non_working_days, daily_target_sec=8*3600, daily_min_sec=4*3600):
+    nwd = set(non_working_days)
+    # group by date
+    by_date = defaultdict(int)
+    for w in rows:
+        by_date[w["date"]] += w["time_spent_seconds"]
+    # determine week's working weekdays
+    monday = date.fromisoformat(rows[0]["week_start"]) if rows else today_monday()
+    week_dates = [(monday + timedelta(d)).isoformat() for d in range(7)]
+    working = [d for d in week_dates
+               if date.fromisoformat(d).weekday() < 5 and d not in nwd]
+    target = daily_target_sec * len(working)
+    total = sum(by_date.values())
+    missing_days = [d for d in working if by_date.get(d, 0) == 0]
+    low_days     = [d for d in working if 0 < by_date.get(d, 0) < daily_min_sec]
+    return {
+        "total_seconds": total,
+        "target_seconds": target,
+        "working_days": len(working),
+        "below_target": total < target,
+        "gap_seconds": max(0, target - total),
+        "missing_days": missing_days,   # hard gaps → drive badge/notification
+        "low_days": low_days,           # soft warnings
+        "per_day": {d: by_date.get(d, 0) for d in working},
+    }
+```
+
+### Why this satisfies the requirement
+
+- The 40h target is **not** a constant — it's `8h × working_days`, so marking a non-working day automatically lowers the bar for that week (40h → 32h for a 4-day week). This is computed per-week from that week's `non_working_days` entries, so holidays only affect the weeks they fall in.
+- The function runs on **stored** rows → no Jira hit → cheap enough to call on every auto-refresh and to power the nav badge.
+
+---
+
+## Browser Notifications & Badge
+
+### Permission flow
+
+1. **Secure-context caveat (pitfall — flagged MEDIUM confidence):** The Web `Notification` API requires a *secure context*. `https://` and `http://localhost` qualify; a plain `http://hostname` on the company LAN generally does **not**, so `Notification.requestPermission()` may be rejected/no-op. Mitigation: (a) serve the toolkit behind HTTPS (recommended), or (b) treat the in-app badge + toast as the always-available primary signal and the OS notification as a best-effort enhancement. Do not block the feature on permission.
+2. **Request trigger:** a "Enable browser notifications" toggle in the Config (or Insights) tab calls `Notification.requestPermission()`. Store the resulting state (`granted` / `denied` / `default`) in `toolkit_settings.json` so we don't re-prompt every load.
+3. **Fire trigger:** the auto-refresh loop (or a dedicated `/insights/summary` poll) calls `compute_insights`; if `missing_days` or `below_target` is true and permission is `granted`, fire `new Notification(...)`.
+
+### Badge
+
+- **Nav-level badge (cross-plugin visibility):** add `setPluginBadge(pluginId, count)` to `core.js`. It finds the nav button for that plugin and renders a small red dot/number. This is the "tab-bar badge" the user sees without opening the plugin. Driven by `/api/jira/insights/summary` → `{gap_count}`.
+- **In-plugin Insights tab badge:** the Insights tab button in the jira sidebar shows a dot when `gap_count > 0`.
+- Both always work regardless of `Notification` permission.
+
+---
+
+## Scaling Considerations
+
+| Scale | Architecture Adjustments |
+|-------|--------------------------|
+| Single user / small team (current reality) | Current design is more than enough. SQLite WAL + per-plugin file is correct; no server needed. |
+| Dozens of teammates viewed at once | Read-through already dedups per-week fetches; add the in-flight guard (Pattern 4) so N teammates don't each trigger N Jira calls. Cache `cache_meta` per account_id. |
+| Hundreds of users | SQLite still fine for read-heavy mirror, but consider moving the per-issue `/worklog` fan-out to a background sync job (like `doc_search._sync_job`) instead of synchronous request-time fill, so the UI reads only from SQLite. Out of scope for M4. |
+
+### Scaling Priorities
+1. **First bottleneck:** Jira rate-limits the per-issue `/worklog` fan-out. Fix with in-flight guard + longer TTL + background sync later.
+2. **Second bottleneck:** WAL checkpoint / `checkpoint` on shutdown. doc_search pattern doesn't checkpoint explicitly; follow the same (acceptable at this scale).
+
+---
+
+## Anti-Patterns
+
+### Anti-Pattern 1: Keep re-fetching Jira on every tab open
+**What people do:** current `jira.js` calls the API in every `_renderWeekly`/`_renderAssigned`, and `createTabs` destroys the DOM on switch.
+**Why it's wrong:** slow, rate-limit prone, and makes tab switching feel broken.
+**Do this instead:** persistent DOM (toggle) + read-through SQLite + shared `this._store`.
+
+### Anti-Pattern 2: Store the cache in process memory
+**What people do:** current `_wl_cache` dict.
+**Why it's wrong:** lost on every restart / plugin re-entry → re-fetch, defeating "instant".
+**Do this instead:** SQLite mirror (`jira_store.py`), survives restarts, survives plugin switches.
+
+### Anti-Pattern 3: Blocking SQLite on the event loop
+**What people do:** calling `sqlite3` directly inside `async def` route handlers.
+**Why it's wrong:** PROJECT.md explicitly warns — "event-loop SQLite access corrupts on Windows."
+**Do this instead:** every DB call via `asyncio.to_thread()` behind `_db_lock`, exactly like `doc_search.py`.
+
+### Anti-Pattern 4: Hard-code the 40h target
+**What people do:** `if total < 40*3600`.
+**Why it's wrong:** ignores non-working days → false "short week" alarms on holidays.
+**Do this instead:** `target = 8h × working_days_in_week` from `non_working_days` (Pattern 3).
+
+### Anti-Pattern 5: Block the feature on Notification permission
+**What people do:** only show gaps if `Notification.permission === "granted"`.
+**Why it's wrong:** LAN http:// context may deny it; user sees nothing.
+**Do this instead:** badge + toast always; OS notification is best-effort enhancement.
+
+---
+
+## Integration Points
+
+### External Services
+
+| Service | Integration Pattern | Notes |
+|---------|---------------------|-------|
+| Jira Cloud REST API | Read-only mirror; fetched only on cache miss / force | `jira_tracker.py` keeps `_jira()`/`_api()`; store never writes business data back to Jira |
+| Browser Notification API | `Notification.requestPermission()` + `new Notification()` | Requires secure context (HTTPS/localhost); degrade to badge+toast otherwise |
+
+### Internal Boundaries
+
+| Boundary | Communication | Notes |
+|----------|---------------|-------|
+| `jira_tracker.py` ↔ `jira_store.py` | Direct Python import (same process) | `jira_tracker` imports `get_worklogs`, `upsert_worklogs`, `mark_stale`, `compute_insights`, `ensure_schema` |
+| `jira_tracker.py` ↔ `config` | `config.load_jira_config()` | TTL still read from `cache_ttl_minutes`; add `notifications_enabled`, `daily_target_hours` |
+| `jira.js` ↔ backend | `api()` JSON | New fields: `stale` flag on weekly; `/insights` + `/insights/summary` endpoints |
+| `jira.js` ↔ `core.js` | `setPluginBadge(id, n)` (NEW) | Additive; used to render nav badge |
+| `jira.js` internal | `this._store` shared map | Single source of truth across tabs; dirty flags trigger re-render |
+
+---
+
+## New vs Modified Components (explicit)
+
+| Component | Status | Change |
+|-----------|--------|--------|
+| `app/plugins/jira_store.py` | **NEW** | SQLite schema, `_get_db`/WAL/`_db_lock`/`_ensure_schema`, read-through `get_worklogs`, `upsert_worklogs`, `mark_stale`, `get_assigned`/`upsert_assigned`, `compute_insights`, `non_working_days` CRUD |
+| `app/plugins/jira_tracker.py` | MODIFIED | `_wl_cache` in-memory dict replaced by `jira_store` calls; `/worklogs/weekly` & `/assigned` read-through; add `/insights` + `/insights/summary`; writes call `mark_stale`; `startup()` calls `jira_store.ensure_schema()`; `cache_ttl` still from config |
+| `app/static/js/jira.js` | MODIFIED | Persistent sidebar + `this._store` + dirty flags (replace `createTabs` re-render); new Insights view; Notification permission toggle; badge consumption |
+| `app/static/js/core.js` | MODIFIED (small, additive) | `setPluginBadge(pluginId, count)` helper; non-breaking |
+| `app/plugins/jira_tracker.db` | **NEW (generated)** | WAL SQLite mirror; git-ignored |
+
+---
+
+## Suggested Build Order
+
+Dependencies drive the order. The store is the foundation; UI and insights build on top of it.
+
+**Phase A — Storage foundation (`jira_store.py`)**  ⬅ lowest risk, highest leverage
+- Schema, `_get_db` (WAL), `_db_lock`, `_ensure_schema`, upsert/get worklogs + assigned, `cache_meta`, `non_working_days` table.
+- Wire `JiraTrackerPlugin.startup()` → `jira_store.ensure_schema()`.
+- *No UI change yet.* Can be validated with a tiny script hitting `upsert`/`get`.
+
+**Phase B — Read-through cache integration (modify `jira_tracker.py`)**
+- Refactor `/worklogs/weekly` and `/assigned` to call `jira_store` read-through.
+- Replace in-memory `_wl_cache` with store; keep `cache_ttl_minutes` semantics.
+- Invalidations on `POST/PUT/DELETE /worklog` and `/meeting` → `mark_stale`.
+- Add **stale-serve** (return persisted rows + `stale:true` on Jira failure).
+- Add in-flight guard (Pattern 4).
+- *Now restarts are instant; backend is Jira-free on warm cache.*
+
+**Phase C — Insights engine (backend)**  ⬅ can start in parallel with B after A lands
+- `compute_insights()` pure function over stored rows + `non_working_days`.
+- `/api/jira/insights?week_of=` (full detail) and `/api/jira/insights/summary` (just `gap_count`).
+- `non_working_days` CRUD endpoints + config for `daily_target_hours`.
+
+**Phase D — Frontend persistent layout + shared store (modify `jira.js`)**
+- Replace `createTabs` re-render with persistent sidebar + `this._store` + dirty flags.
+- One shared auto-refresh interval for the plugin; reads through backend (which now hits SQLite, not Jira).
+- *Tab switching is now instant and offline-tolerant.*
+
+**Phase E — Insights tab UI**
+- Render insights (missing days, low days, week-vs-target bar, gap seconds).
+- Gap-fill quick actions: "log hours for missed day" / "top up short week" (reuse existing worklog POST, then `mark_stale` + dirty).
+- Non-working-day marker UI (click a day → mark holiday).
+- *Depends on C (data) + D (layout).*
+
+**Phase F — Notifications + badge**
+- `setPluginBadge` in `core.js`; nav dot driven by `/insights/summary`.
+- In-app Insights tab badge.
+- Notification permission flow (Config/Insights toggle) + fire on gap detection; graceful fallback when no secure context.
+- *Depends on C (knows gaps) + D (layout) + small core.js change.*
+
+> **Vertical-slice note:** A+B is a complete, shippable "instant reload" slice on its own (no new UI features, just speed + durability). C→F are the insight/notification layer and can follow as a second slice. Recommend landing A+B first to de-risk the cache before building UI on top of it.
+
+---
+
+## Open Questions / Gaps
+
+- **Secure context for Notifications:** Confirm whether the toolkit is served over HTTPS or only `http://hostname` on the LAN. If HTTP-only, OS notifications won't fire and the badge+toast is the real UX. (MEDIUM confidence — based on Web platform spec; verify deployment.)
+- **Auto-refresh vs. Jira rate limits:** Need to confirm Jira Cloud rate limits for the per-issue `/worklog` fan-out at the team's scale; the in-flight guard + TTL mitigate but a background-sync model (like `doc_search`) may be needed if teammate counts are large.
+- **History window for insights:** Should "missing days" scan only the current week, or N past weeks? Recommend current week + optionally the previous week for Monday-morning catch-up; confirm with user.
+- **Marking past non-working days:** Should users be able to back-date holiday marks (affects past-week targets)? Recommend yes (cheap, just rows), but confirm.
+
+---
+
+## Sources
+
+- `app/plugins/jira_tracker.py` (existing routes, in-memory cache, Jira fetch logic) — **read, authoritative**
+- `app/static/js/jira.js` (current tab re-render behavior, shared `_assignedCache`) — **read, authoritative**
+- `app/static/js/core.js` (`createTabs` wipes `body.innerHTML` on activate — root cause) — **read, authoritative**
+- `app/plugins/doc_search.py` (reference pattern: `DB_PATH`, WAL, `_db_lock`, `_ensure_schema`, `asyncio.to_thread`, `startup()`) — **read, authoritative**
+- `app/plugins/base.py` (`ToolkitPlugin` lifecycle: `register_routes`/`startup`/`shutdown`) — **read, authoritative**
+- `.planning/PROJECT.md` (M4 goal, SQLite+WAL+`asyncio.to_thread` convention, "Jira authoritative / local read-only mirror") — **read, authoritative**
+- Web Notifications API secure-context requirement — **training knowledge, flagged MEDIUM confidence** (verify deployment's scheme)
+
+---
+*Architecture research for: Jira Tracker rework (M4) — local cache, seamless tabs, notifications, insights*
+*Researched: 2026-07-13*

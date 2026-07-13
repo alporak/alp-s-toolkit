@@ -1,405 +1,403 @@
 # Pitfalls Research
 
-**Domain:** Documentation Search Engine — text extraction + full-text search + plugin integration
-**Researched:** 2026-07-01
-**Confidence:** HIGH
+**Domain:** Adding local SQLite cache + browser notifications + "hours-vs-target" insights to an existing Jira time-tracking FastAPI plugin (Alps Toolkit M4)
+**Researched:** 2026-07-13
+**Confidence:** HIGH (most pitfalls directly evidenced in `app/plugins/jira_tracker.py` and `PROJECT.md`; platform behaviors — SQLite WAL, Notification API, TZ handling — are stable and well-established. One item flagged for a live-spike verification.)
 
-Sources: official PyPI pages, library documentation (python-docx, pdfplumber, doc2txt, Whoosh, textract, charset-normalizer, olefile), SQLite FTS5 docs, existing project codebase analysis.
+---
+
+## Scope Note
+
+This research targets mistakes *specific to adding* these three features to the **existing** Jira Tracker plugin. It does **not** re-litigate the plugin's current design (that is accepted context). Every pitfall below is anchored to a line/behavior in the shipped code or a documented toolkit constraint. Where a pitfall depends on behavior we cannot read from source (e.g., exactly what timezone offset Jira's API returns in `started`), it is flagged for a Phase-1 spike.
+
+Assumed M4 phase structure (reconcile with the actual ROADMAP.md when authored):
+- **Phase 1 (BE foundation):** SQLite read-through cache + event-loop refactor of the Jira client.
+- **Phase 2 (FE redesign):** Persistent sidebar, tab state kept alive, shared in-memory store, no re-fetch on tab switch.
+- **Phase 3 (Notifications):** In-app Insights tab + toggleable browser Notification API + tab-bar badge.
+- **Phase 4 (Insights engine):** Week math, target calculation, configurable non-working-day marking.
+- **Phase 5 (Gap-fill tools):** Quick log / top-up actions.
 
 ---
 
 ## Critical Pitfalls
 
-### Pitfall 1: Assuming python-docx Handles .doc Files
+### Pitfall 1: Cache treated as source of truth (stale-mirror divergence)
 
 **What goes wrong:**
-Developers write `from docx import Document; text = Document("file.doc")` and get cryptic errors. python-docx v1.2.0 only handles OpenXML (.docx) format — it has zero support for legacy OLE2 Compound File Binary Format (.doc, pre-2007). The project has 201 .doc files that will silently fail.
+The SQLite store is meant to be a *read-only mirror* of Jira (PROJECT.md: "SQLite-backed local persistence… read-only mirror of Jira"). The failure mode is code that, after a successful POST/PUT/DELETE to Jira, *writes the optimistic result directly into the cache* (e.g., insert the new worklog row locally) instead of invalidating and letting the next read re-fetch. If the local insert and the remote state ever disagree (clock skew, Jira rounding `timeSpentSeconds`, the worklog landing on a different issue than requested), the cache becomes the authority and the divergence is permanent until TTL.
 
 **Why it happens:**
-The naming is misleading: `python-docx` implies it handles "doc files." Every new developer on this domain makes this mistake. The library's name refers to the DOCX format, not .doc files.
+Optimistic local updates feel faster ("instant" UI) and it's tempting to reuse the request payload as the cache row.
 
 **How to avoid:**
-Use a dispatch table keyed on extension:
-- `.docx` → `python-docx` (Document(path).paragraphs)
-- `.doc` → `doc2txt.extract_text(path)` (wraps antiword with bundled Windows binary, v1.0.8, July 2025)
-- `.pdf` → `pdfplumber` (for text-based PDFs)
-- `.pptx` → `python-pptx` (if encountered)
-
-Alternatively, use `textract v2.0.0` (April 2026) as a unified facade — it wraps all these libraries but is a single-point-of-failure if one backend breaks.
+- Enforce a single rule: **the cache is populated *only* by a successful Jira fetch, never by a write payload.** On a successful worklog add/edit/delete, *invalidate* the affected key(s) and return fresh data or signal the client to refetch.
+- Make the cache layer a pure read-through function: `get(key) -> miss ? fetch_from_jira() -> store() -> return : return stored`. Never expose a `put_after_write()` path.
+- Add an integration test that asserts: after a simulated Jira write, the cache row for that week is *absent* (or stale-flagged), not updated.
 
 **Warning signs:**
-- `python-docx` import errors or AttributeError when trying to open .doc files
-- Corrupted/garbled text from .doc files (someone tried `open().read()` as a fallback)
-- Missing search results for all legacy Word documents
+- Code contains `INSERT`/`UPDATE` into the worklog cache outside the fetch path.
+- After adding a worklog, the returned `cached: true` for the same week.
 
-**Phase to address:**
-Text extraction phase (Phase 1). Must be part of the extraction pipeline design before any index building.
+**Phase to address:** Phase 1 (cache layer contract).
 
 ---
 
-### Pitfall 2: Whoosh Is Abandonware — Using It Creates a Dead End
+### Pitfall 2: Over-broad invalidation → cache stampede / cross-user blowout
 
 **What goes wrong:**
-Whoosh v2.7.4 was released April 4, 2016 — over 10 years ago. It has:
-- Zero Python 3.12/3.13 compatibility testing
-- No async support (synchronous file I/O in FastAPI event loop = blocked threads)
-- No active maintenance (last commit years ago)
-- No type hints (contemporary Python tooling blind spot)
-- Index corruption bugs that will never be fixed
+The current code calls `_cache_clear()` (full module dict wipe, lines 533/553/564/571) on *every* write. With a persistent SQLite cache this is worse than wasteful:
+- A full `DELETE FROM worklog_cache` means the next read of *any* open week or *any* teammate re-fetches from Jira simultaneously → thundering herd when the user has several weeks/teammates loaded.
+- Clearing teammate data when *I* log a worklog is incorrect scoping (teammate weeks didn't change).
 
 **Why it happens:**
-Whoosh appears in many "Python full-text search" guides and has great documentation. It was excellent software in its time. Without checking release dates, it seems like a solid pick.
+The in-memory dict made a full clear cheap; the pattern was carried over blindly to a DB-backed cache.
 
 **How to avoid:**
-Use **SQLite FTS5** instead. The project already has SQLite infrastructure (WAL mode, per-plugin DB files, `asyncio.to_thread()` patterns for writes — see `competence.py` lines 94-99). FTS5:
-- Ships with Python's `sqlite3` module (zero-dependency)
-- Supports BM25 ranking (better than TF-IDF for search relevance)
-- Built-in `highlight()` and `snippet()` functions for hit highlighting
-- Content-less FTS tables for external content storage (store full path + extracted text separately)
-- Thread-safe with `check_same_thread=False` + `asyncio.to_thread()`
-- Existing plugin schema management pattern already proven (schema versioning via `sync_state` table)
-
-Relevant SQL: `CREATE VIRTUAL TABLE doc_search USING fts5(path, content, title, repo, tokenize='unicode61');`
+- Invalidate by **(account_id, week_monday)**, not globally. Key the cache table on `account_id` + `week_start` (and a `date_from`/`date_to` range column for the raw fetch).
+- On a write for account `A` affecting week `W`, delete only rows where `account_id = A AND week_start = W`. If a worklog's date is edited across a week boundary, invalidate *both* old and new weeks.
+- Keep a `force_refresh` path that invalidates a single key (already exists at line 454). Never expose a global clear to normal writes; reserve global clear for an explicit user action / config change (as today).
 
 **Warning signs:**
-- Whoosh index file locking errors on Windows
-- Random `LockError` or `IndexError` in Whoosh during concurrent reads
-- Deprecation warnings on Python >= 3.12
+- A write handler calls a "clear all" function.
+- After one log, the network tab shows Jira refetches for weeks the user isn't even looking at.
 
-**Phase to address:**
-Search index design phase (Phase 2). Must decide FTS5 vs Whoosh before index schema is committed.
+**Phase to address:** Phase 1 (cache keying + scoped invalidation).
 
 ---
 
-### Pitfall 3: PDF Text Extraction Silently Returns Empty/Partial Text on Scanned Documents
+### Pitfall 3: Event-loop blocking from the existing synchronous Jira client
 
 **What goes wrong:**
-pdfplumber (and all pdfminer.six-based libraries) extract text from machine-generated PDFs. Scanned PDFs (image-based) have no embedded text layer — `page.extract_text()` returns `""` or garbage. 393 PDF files in the repos will have a mix. Without detection, scanned PDFs produce zero search hits with no user-facing indication why.
+Every route handler calls `_api()` (line 91, `requests`) or `_jira()` (line 31, the `jira` library) **synchronously inside `async def`** (e.g., lines 298, 353, 430, 457, 530). These block the entire FastAPI event loop. PROJECT.md is explicit: *"All blocking I/O via `asyncio.to_thread()` — never on event loop (Windows SQLite safety)"* and *"All DB writes through `asyncio.to_thread()`."* The Jira plugin currently **violates the toolkit's own hard rule.** Once you add SQLite reads/writes on the same loop, a blocked loop + SQLite on Windows is exactly the corruption scenario the toolkit already documented (Key Decision #53).
 
 **Why it happens:**
-pdfplumber's documentation clearly states "Works best on machine-generated, rather than scanned, PDFs" — but developers skip this line. There's no built-in OCR capability and no warning when text extraction fails silently.
+The plugin predates the toolkit's `asyncio.to_thread` convention (it's M1-era code); the rule was enforced on later plugins (doc_search) but never retrofitted here.
 
 **How to avoid:**
-1. After extraction, if `len(extracted_text) < 20` characters and page count > 0 → flag as "likely scanned"
-2. Store a `needs_ocr: true` flag in the document metadata table
-3. Log a warning: `"PDF appears scanned, no text extracted: {path}"` 
-4. In the search UI, indicate which documents are image-only with a `⚠` icon
-5. Do NOT add OCR dependencies (tesseract, pytesseract) to the plugin — it's out of scope, adds massive Windows install complexity, and dramatically slows extraction
-6. Offer a clear UX message: "X documents could not be searched (scanned PDFs)"
+- Wrap **every** blocking call in `await asyncio.to_thread(...)`: the `_api()` HTTP call, the `_jira().search_issues()` call, and **all** SQLite operations (open/query/commit).
+- Do not share a single module-global `_jira_client` across threads without a lock, or better: create the client lazily per-thread (the `jira` client is not documented thread-safe). A simple `functools.lru_cache` keyed by thread ident, or a `threading.Local`, avoids cross-thread reuse.
+- Add a lint/CI guard or a smoke test that fails if a route handler does a sync call outside `to_thread` (or at minimum a comment contract + review checklist).
 
 **Warning signs:**
-- Search queries that should match known content return 0 results
-- `page.extract_text()` returns empty string for multi-page PDFs
-- User complaints about "I know this PDF contains the word, but search doesn't find it"
+- A `/api/jira/*` request blocks *all other* toolkit requests (e.g., doc search hangs while a Jira fetch is in flight).
+- `sqlite3` "database is locked" / corruption after a slow Jira call coincides with a DB write.
 
-**Phase to address:**
-Text extraction phase (Phase 1). Scanned PDF detection must be built into the extraction pipeline.
+**Phase to address:** Phase 1 (this is the foundation; everything else builds on it). HIGH confidence — documented constraint.
 
 ---
 
-### Pitfall 4: Blocking the FastAPI Event Loop with Synchronous Extraction and Git Operations
+### Pitfall 4: Concurrent SQLite writes on Windows ("database is locked")
 
 **What goes wrong:**
-Text extraction from 3000 files + git pull across 3 repos + SQLite FTS5 index building are all synchronous, blocking operations. Running them directly in a FastAPI route handler or `startup()` callback freezes the entire server. The competence plugin already shows the pattern: `asyncio.create_task()` for background work (line 609 of `competence.py`), but git operations and file I/O still need to be offloaded.
+WAL mode (toolkit standard, PROJECT.md) allows many concurrent *readers* but **only one writer at a time**. With the new cache you now have multiple write sources contending: (a) a Jira fetch writing the cache after a miss, (b) an invalidation `DELETE`, (c) non-working-day metadata writes (Phase 4), (d) possibly a periodic background refresh. Two of these racing produce `sqlite3.OperationalError: database is locked`, surfacing as 500s or, worse, a half-written cache row.
 
 **Why it happens:**
-- `docx.Document(path)` is synchronous (no async file API exists)
-- `pdfplumber.open(path)` is synchronous
-- `git pull` via `subprocess.run()` blocks the event loop
-- SQLite writes block if not wrapped in `asyncio.to_thread()`
-- Developers test with 5 files (seems fast) → deploy with 3000 files (blocks for 30+ seconds)
+`sqlite3` connections are not thread-safe by default; spawning writers from multiple `asyncio.to_thread` tasks without serialization re-creates the exact Windows corruption risk the toolkit already flagged.
 
 **How to avoid:**
-1. ALL extraction work must run in `asyncio.to_thread(extract_all_docs)` — NEVER in the event loop
-2. Use `run_in_executor` with a `concurrent.futures.ThreadPoolExecutor(max_workers=4)` for parallel extraction (too many workers = disk I/O thrashing)
-3. Git operations: `asyncio.to_thread(subprocess.run, ["git", "pull"], ...)` — use `subprocess` not `GitPython` (which has its own blocking issues)
-4. Index builds: wrap the entire `INSERT INTO fts5 ...` batch in `asyncio.to_thread()`
-5. Follow the exact async pattern from `competence.py` lines 93-99:
-```python
-async def _db_execute_async(query: str, params: tuple) -> None:
-    await asyncio.to_thread(_db_execute, query, params)
-```
+- Open a **dedicated connection per thread** (`check_same_thread=False` only if you fully serialize access; prefer per-thread connections via a small pool or `threading.Local`).
+- Set `PRAGMA busy_timeout = 5000` so a contending writer waits instead of erroring.
+- Serialize *writes* through a single `asyncio.Lock` (or a write queue / executor) so only one `to_thread` write runs at a time. Reads can run freely (WAL).
+- Reuse the toolkit's established `_ensure_schema()`-at-startup + WAL + auto-migration (version-bump `ALTER TABLE`) pattern (Key Decisions #56/#57) — do not reinvent.
 
 **Warning signs:**
-- Server hangs during sync/extraction (all routes time out)
-- `RuntimeWarning: coroutine 'X' was never awaited`
-- uvicorn logs showing long request durations during index build
+- Intermittent 500s with `database is locked` in logs under concurrent use.
+- `PRAGMA journal_mode` not `wal` after startup.
 
-**Phase to address:**
-Every phase. This is the #1 integration pitfall. The extraction phase, search phase, and sync phase all touch blocking I/O.
+**Phase to address:** Phase 1 (DB layer). HIGH confidence — WAL single-writer is a documented SQLite fact and the toolkit already encodes the rule.
 
 ---
 
-### Pitfall 5: Character Encoding Decoding Errors on Legacy Documents (Mojibake)
+### Pitfall 5: Timezone off-by-one at week boundaries (Monday local vs UTC)
 
 **What goes wrong:**
-Old .doc and .pdf files from Eastern European or mixed-locale environments use non-UTF-8 encodings: Windows-1257 (Baltic), ISO-8859-13, CP852, Windows-1252. Reading them as UTF-8 produces `UnicodeDecodeError` or, worse, `errors='replace'` producing silent garbage (mojibake) that goes into the search index unnoticed. Search queries then fail silently.
+Two coupled bugs:
+1. **Date extraction ignores the offset.** Lines 229 and 508 do `w.get("started","")[:10]` — they slice the date out of the ISO string and **discard the timezone offset**. Jira's `started` carries an offset (e.g., `2026-07-13T02:00:00.000+0000` for 05:00 Baltic). If Jira returns the timestamp in UTC, a worklog physically logged at 02:00 on *Monday* Baltic is encoded as *Sunday* UTC, so `[:10]` yields Sunday → it lands in the wrong week and the Monday-week insight misses it (or a Sunday-week insight over-counts).
+2. **Week boundary uses server-local naive date.** `_week_range` (lines 158-166) uses `date.today()` / `date.fromisoformat()` with no timezone — correct only if the *server* is in the user's Baltic TZ. The user is Baltic, but the rule "Monday in local TZ" must be *the user's* TZ, not wherever the process runs.
+
+The two must use the **same** timezone or you get silent mis-bucketing.
 
 **Why it happens:**
-- .doc files store text in the encoding of the creating Word version (often locale-specific)
-- pdfminer.six may extract text bytes that need decoding
-- RST files can use `# -*- coding: cp1257 -*-` declarations
-- `str(bytes_data)` without explicit encoding detection
-- Developers assume "everything is UTF-8 in 2026"
+String-slicing a datetime is a classic shortcut that works only when the stored offset equals the desired display TZ.
 
 **How to avoid:**
-1. Use `charset-normalizer v3.4.7` (actively maintained, April 2026) for ALL text extraction outputs:
-```python
-from charset_normalizer import from_bytes
-result = from_bytes(raw_bytes).best()
-if result:
-    text = str(result)
-```
-2. For pdfplumber: the library usually returns Python `str` — but verify with `isinstance(text, str)` and handle edge cases
-3. For .doc via doc2txt: output is already decoded, but run through charset-normalizer as a safety net
-4. For .docx via python-docx: uses XML internally (UTF-8 by spec), but embedded content from legacy sources may still carry encoding issues
-5. Store a `detected_encoding` column in the document metadata table for debugging
-6. Log encoding detection confidence: `< 0.5` confidence → flag for manual review
+- Parse `started` as a timezone-aware `datetime` (`datetime.fromisoformat` handles the offset) and **convert to the user's local TZ before taking the date**: `date_local = started.astimezone(LOCAL_TZ).date()`. Store an explicit `date_local` column at insert time so all later math is offset-free.
+- Define `LOCAL_TZ` once (e.g., `zoneinfo` from a config or default `Europe/Vilnius`) and use it for *both* `_week_range` (compute Monday/Sunday in `LOCAL_TZ`) and the per-worklog date. Do not mix naive `date.today()` with offset-aware conversion.
+- Add a unit test with a known boundary case: a worklog at `2026-07-13T01:00:00+0000` (Baltic 04:00 Mon) must bucket to Monday 2026-07-13, not Sunday.
 
 **Warning signs:**
-- Search for "specifikacija" returns 0 results but the document clearly contains it
-- Random `\ufffd` replacement characters in extracted text
-- `UnicodeDecodeError` in logs during extraction
-- Lithuanian character ė/ą/ų appearing as garbled text
+- Total weekly hours differ between the Jira web UI and the plugin by exactly the hours of a worklog logged late/early in the day.
+- Insights show "missing day" for a day the user actually logged (off-by-one at Mon/Sun edge).
 
-**Phase to address:**
-Text extraction phase (Phase 1). Must be in the extraction pipeline from day one.
+**Phase to address:** Phase 1 (store `date_local`) and Phase 4 (week math must use `LOCAL_TZ`). **Flag for spike:** confirm empirically what offset Jira returns in `started` for this account (UTC vs reporter TZ) via one live `GET issue/{key}/worklog` during Phase 1 — the fix is correct regardless, but the spike confirms whether current production data already has mis-bucketed rows to backfill.
 
 ---
 
-### Pitfall 6: Search Index Rebuild on Every Startup (Cold Start Performance)
+### Pitfall 6: Weekly target miscalculation when non-working days are marked mid-week
 
 **What goes wrong:**
-Building an FTS5 index from 3000 documents every time the plugin starts takes 30-120 seconds. If the index is rebuilt in `startup()`, the plugin is unusable until the build completes. Even worse: indexing triggers a cascade of extraction (git pull → text extraction → FTS indexing), amplifying the delay.
+Default target is "40h/week ≈ 8h × 5 days." Marking a non-working day (holiday / PTO) should drop the target (40h → 32h for a 4-day week). The traps:
+- **Wrong scaling model.** Naively computing `target = 40h × (working_days / 5)` yields `40 × 4/5 = 32h` — which *coincidentally* matches `8 × 4`, so it looks right for one day off but breaks for two (`40 × 3/5 = 24h` vs the intended `8 × 3 = 24h` — still matches)… until you realize the *correct* semantic is **per-day base × working_days**, not weekly-total scaled. They only align because base = 8 and full week = 5. The moment the per-day base is configurable (e.g., a 6h/day norm), the scaling model silently produces wrong targets. Pin the model to **`daily_target × working_days`**.
+- **Hours already logged on the marked-off day.** If the user logged 8h on a day they later mark non-working, two valid interpretations exist: (a) exclude that day entirely from both target and logged (treat as 0/0), or (b) keep the logged 8h but lower the target. Mixing them ("lower target but still count the 8h") makes the week look *over* target and hides the gap.
+- **Retroactive redefinition of history.** Marking a past week's day off changes that week's target. Decide whether marking is metadata applied at *query time* (recalc on read, non-destructive) or a mutation. Query-time is required so you can toggle/undo without rewriting logged hours.
+- **Weekends counted as working days.** `working_days` must start from *weekdays minus weekends minus marked-off*, not raw 5.
 
 **Why it happens:**
-- FTS5 index stored in memory or as a file that's deleted on schema migration
-- No cache invalidation strategy — developers check "does index exist?" → "no" → rebuild
-- Index file not persisted across restarts (wrong DB path)
-- Schema version bump causes DROP+CREATE every startup
+"40h target" is a verbal shorthand that hides the per-day base; teams implement the scaling formula and only notice the error when the base changes or a logged day is marked off.
 
 **How to avoid:**
-1. **Persist the FTS5 index to disk**: Use a SQLite file at `app/plugins/doc_search_index.db` (not `:memory:`)
-2. **Incremental updates, not full rebuilds**: On startup, only re-extract files modified since last index update (compare file mtimes against `doc_metadata` table)
-3. **File hash fingerprinting** for accuracy: Store `xxhash` or SHA-256 of each file in metadata. If mtime changed but hash didn't → skip re-extraction
-4. **Lazy loading**: Serve basic UI immediately; start index verification in background via `asyncio.create_task()` — show a "Indexing... X of 3000 files" progress indicator
-5. **Use `startup()` for DB schema init only** (like `competence.py` lines 1037-1092), kick off sync in a background task
-6. Rebuild only when: git pull detects new content OR schema version changes OR manual "Rebuild Index" button
+- Store target as **`daily_target` (default 8h) + a set of marked non-working dates**; compute `target = daily_target × (5 − weekends_in_week − marked_off_in_week)` at *query time*.
+- For a marked-off day that has logged hours: **exclude it from both numerator and denominator** and surface a warning ("Day X has 8h logged but is marked non-working — hours excluded from this week's total"). Let the user decide to move/delete those hours (gap-fill, Phase 5) rather than silently counting them.
+- Keep marking as metadata; never mutate stored `time_spent_seconds`. Recalculation is idempotent and reversible.
+- Unit-test: mark Thu+Fri off a 40h week with 8h logged Mon–Wed → target 24h, logged 24h, "on target." Mark a day that has 8h logged → warning + that day excluded.
 
 **Warning signs:**
-- Plugin takes 60+ seconds to show UI after server start
-- SQLite file grows 500MB+ (unindexed document text stored inline in FTS)
-- Repeated `DROP TABLE` / `CREATE VIRTUAL TABLE` in startup logs
+- A 4-day week shows target 40h (forgot to subtract) or 24h when base should be 8×4=32 (wrong scaling).
+- "On target" weeks where the user actually took a day off and logged nothing — false negatives.
 
-**Phase to address:**
-Index design phase (Phase 2) + Sync phase (Phase 3). Persistence strategy must be designed before index schema.
+**Phase to address:** Phase 4 (insights engine — this is its core logic). HIGH confidence on the modeling pitfall; the chosen interpretation (exclude day from both sides) should be confirmed against the product spec.
 
 ---
 
-### Pitfall 7: FTS5 Content Storage Strategy — Inline vs Content-Less
+### Pitfall 7: Notification spam (state-transition vs every-render)
 
 **What goes wrong:**
-The default FTS5 table stores indexed text directly in the virtual table structure. For 3000 documents averaging 100+ KB of extracted text each, this balloons the index file to 500MB+, slows queries, and makes incremental updates expensive (must delete + reinsert entire document instead of updating metadata).
+Notifications fire on every insights recompute / every poll / every tab open instead of on *change*. Concretely: opening the Insights tab recomputes gaps and re-notifies "You have a missing day" every time → the user disables notifications entirely within a day. The badge also flickers if recompute runs on a timer.
 
 **Why it happens:**
-The simplest FTS5 pattern is:
-```sql
-CREATE VIRTUAL TABLE docs USING fts5(content);
-INSERT INTO docs VALUES('long document text here...');
-```
-This stores the full text twice: once in the FTS index structure (for tokenization) AND once in the content table (for retrieval). For 20 documents this is negligible. For 3000 it's crippling.
+It's easier to "notify current gaps" than to track what was already notified.
 
 **How to avoid:**
-Use **content-less FTS5 tables** (external content FTS5):
-```sql
--- Metadata table stores the full extracted text
-CREATE TABLE doc_metadata (
-    id INTEGER PRIMARY KEY,
-    path TEXT UNIQUE NOT NULL,
-    title TEXT,
-    repo TEXT,
-    file_hash TEXT,
-    file_mtime REAL,
-    extracted_text TEXT,     -- full text here
-    detected_encoding TEXT,
-    file_type TEXT,
-    needs_ocr INTEGER DEFAULT 0
-);
-
--- FTS5 table references metadata, stores only tokens
-CREATE VIRTUAL TABLE doc_search USING fts5(
-    path, content, title, repo,
-    content='doc_metadata',        -- points to external table
-    content_rowid='id',            -- uses metadata PK for rowid
-    tokenize='unicode61 remove_diacritics 2'
-);
-```
-This way:
-- `extracted_text` lives in `doc_metadata` once (not duplicated)
-- FTS5 stores only the inverted index (tokens → rowids)
-- `highlight(doc_search, 1, '<mark>', '</mark>')` still works on snippets
-- Updates only modify the small metadata table + FTS tokens, not entire document content
-- Index file stays proportional to unique token count, not raw document size
+- Notify **only on state transitions**: a gap *appears* (new missing day / week drops below target) or *clears* (user logs the hours). Track a per-gap signature (e.g., `f"{account_id}:{week}:{gap_type}"`) of currently-active gaps; diff against last notification set; emit only the delta.
+- **Throttle / dedupe:** one notification per gap signature until it clears. Don't re-notify the same gap on refresh.
+- **Only use the OS Notification API when the page/tab is not focused** (the platform best practice — a visible page should use the in-app badge + Insights tab, not a toast). If `document.visibilityState === 'visible'`, suppress the browser notification and rely on the badge.
+- Respect the toggle: browser notifications default **off**; the in-app badge + Insights tab are always available.
 
 **Warning signs:**
-- `doc_search_index.db` is 10× larger than expected
-- Queries on 3000 documents take >500ms
-- Index rebuild time grows linearly with each document added
+- Opening the tab 3× produces 3 "missing hours" toasts.
+- Notification history fills with duplicates of the same gap.
 
-**Phase to address:**
-Search index design phase (Phase 2). Content storage strategy is a schema-level decision.
+**Phase to address:** Phase 3 (notification engine). HIGH confidence — standard web-notification UX.
+
+---
+
+### Pitfall 8: Permission-denial handling for the Notification API
+
+**What goes wrong:**
+`Notification.requestPermission()` returns `"granted"`, `"denied"`, or `"default"` (user dismissed without choosing). Failure modes:
+- Calling `requestPermission()` **on page load** (not from a user gesture) → browsers block/ignore it and it trains the user to ignore prompts. After a `"denied"`, repeated re-prompts are futile and annoying (the browser will not re-show it).
+- Treating `"default"` (dismissed) the same as `"denied"` → prematurely hiding the feature.
+- Showing the browser-notification toggle as enabled when permission is actually `"denied"` → clicking it does nothing and the user thinks it's broken.
+
+**Why it happens:**
+Permission is requested at the wrong moment and the three states aren't distinguished.
+
+**How to avoid:**
+- Call `requestPermission()` **only from the toggle's click handler** (a user gesture). Never on load.
+- Persist the resolved state. If `"denied"`: hide/disable the browser-notification toggle, show "Enable notifications in your browser settings" hint, and fall back to the in-app badge + Insights tab only.
+- Treat `"default"` as "not yet decided" — keep the toggle available but don't assume granted.
+- Feature-detect `Notification` existence (older/locked-down browsers) before offering the toggle at all.
+
+**Warning signs:**
+- Console shows "Notification permission request ignored because not triggered by user gesture."
+- Toggle is on but no toasts ever appear (silent deny).
+
+**Phase to address:** Phase 3. HIGH confidence — documented browser behavior (MDN Notification API).
+
+---
+
+## Secondary Pitfalls (still phase-owned, lower blast radius)
+
+### Pitfall 9: Caching a failed/empty Jira fetch as "no worklogs"
+
+**What goes wrong:**
+`_fetch_worklogs_for_user` (lines 211-215) returns `[]` on `JIRAError`. If the new cache stores that `[]`, a *transient* Jira 503 becomes "you logged nothing this week" — persisted until TTL, polluting insights ("missing week" false positive) and gap-fill suggestions.
+
+**Why it happens:**
+`[]` is ambiguous: a valid empty week vs. a fetch failure.
+
+**How to avoid:**
+- Never cache a failed fetch. Distinguish: on `JIRAError`/non-OK, return an error / fall back to stale cache, but **do not write** the empty result.
+- Only write cache on a successful, fully-parsed response. Mark cache rows with a `fetched_at` so staleness is explicit.
+- On read miss *and* fetch failure, return HTTP 502/error to the client rather than a misleading empty list.
+
+**Warning signs:** Insights claim "0h logged" during a Jira outage. **Phase:** Phase 1.
+
+---
+
+### Pitfall 10: Write-succeeds / cache-insert-fails race
+
+**What goes wrong:**
+Jira write succeeds (200), you invalidate, then the re-fetch-and-store into SQLite fails (locked/disk). The cache now has *no* row for that week, so the next read treats it as a permanent miss and re-fetches — wasting calls and, if the re-fetch also fails, showing empty.
+
+**Why it happens:** Invalidation and repopulation are two separate steps; only one is guarded.
+
+**How to avoid:**
+- Make cache insert **non-fatal**: on insert failure, log and leave the key *absent* (forcing a re-fetch on next read) rather than writing a partial/empty row. Never write an empty placeholder that looks like "valid empty."
+- Consider returning the fresh Jira payload directly from the write handler (don't depend on the cache for the immediate response), and let the background cache-populate be best-effort.
+
+**Warning signs:** After logging, the week shows empty until a manual force-refresh. **Phase:** Phase 1.
+
+---
+
+### Pitfall 11: TTL used as primary freshness instead of invalidation
+
+**What goes wrong:**
+Plan mentions "smart refresh / TTL / force-refresh." If the implementation leans on a 5-min TTL as the primary freshness mechanism, a user who just logged hours (gap-fill, Phase 5) sees stale data for up to 5 minutes, undermining the "instant" promise and making notifications lag.
+
+**Why it happens:** TTL is easy; write-time invalidation is extra plumbing.
+
+**How to avoid:**
+- Make **write-time invalidation the primary** freshness path (Pitfall 2). TTL is only a *safety net* for changes made outside this tool (e.g., Jira web UI, another user).
+- "Smart refresh" = don't auto-refresh while the user is mid-edit (Phase 2/5); refresh on tab *focus* if the cached row is older than TTL, and always refresh on an explicit user action.
+- Keep TTL short (e.g., 2–5 min) given it's a fallback.
+
+**Warning signs:** User logs hours, badge still shows the gap for minutes. **Phase:** Phase 1 (policy) + Phase 2 (refresh trigger).
+
+---
+
+### Pitfall 12: Frontend shared store goes stale after a backend mutation
+
+**What goes wrong:**
+Phase 2 keeps tab state alive in a shared in-memory store "no re-fetch on tab switch." But a write (add/edit/delete, Phase 5) or an invalidation must propagate to that store, or the UI shows pre-write data after the user logs hours. The "no re-fetch" optimization collides with "show fresh data after I log."
+
+**Why it happens:** The store was designed to *avoid* fetches; it wasn't given an invalidation channel.
+
+**How to avoid:**
+- The write response (or a returned invalidation signal) must update/evict the specific week in the frontend store immediately. "No re-fetch on tab switch" ≠ "never refresh after a mutation."
+- Centralize store mutations behind a `invalidateWeek(accountId, week)` that both drops the cached payload and (if that week is visible) triggers one targeted refetch.
+
+**Warning signs:** After logging, switching tabs shows old hours until a full reload. **Phase:** Phase 2 (store design) + Phase 5 (calls invalidate).
+
+---
+
+### Pitfall 13: Per-account cache scoping collision ("me" vs teammates)
+
+**What goes wrong:**
+The cache must key by `account_id` so caching "me" doesn't overwrite a teammate's week and invalidating "me" doesn't nuke teammate data (Pitfall 2). The existing `_cache_clear(account_id)` scopes by prefix, but the SQLite schema must preserve `account_id` as a first-class key column, and the `is_me` detection (lines 448-452) must not cause double storage of the same person under two keys.
+
+**Why it happens:** Easy to key only by week and let "me" and teammates collide.
+
+**How to avoid:**
+- Primary key `(account_id, week_start)`. Compute `is_me` once and store under the real `account_id` consistently.
+- Invalidation and reads always qualify by `account_id`.
+
+**Warning signs:** Teammate's week disappears when I log; or my week shows teammate's data. **Phase:** Phase 1.
 
 ---
 
 ## Technical Debt Patterns
 
-Shortcuts that seem reasonable but create long-term problems.
-
 | Shortcut | Immediate Benefit | Long-term Cost | When Acceptable |
 |----------|-------------------|----------------|-----------------|
-| Skip encoding detection, assume UTF-8 | One less dependency | Silent search misses on legacy docs, impossible to debug | NEVER — charset-normalizer is 150KB wheel, no reason to skip |
-| Use Whoosh "because docs are great" | Familiar API, good tutorial | Abandonware, Python 3.13 breaks, no one to fix bugs | NEVER — SQLite FTS5 is already in the stack |
-| Extract all text in `register_routes()` | Quick prototype | Blocks all other plugins from loading, server startup delayed | Only in a throwaway spike |
-| Inline FTS5 content storage | Simpler SQL, less code | 500MB+ index, slow rebuilds, per-doc updates impossible | Only if <100 total documents |
-| Pull all 3 repos with `git pull` in startup() | Simple, always fresh | 30s+ startup delay, blocked UI, git auth failure kills plugin | NEVER — git sync must be background task |
-| Skip DrawIO/GraphML extraction as "too complex" | Faster delivery | 2 file formats not searchable, users lose trust in completeness | Acceptable IF clearly communicated and added in next milestone |
-| Hardcode repo paths in plugin | Easy to write | Breaks when repos move, no way to change without code edit | NEVER — store in config, same pattern as competence plugin's Jira config |
-| Use `subprocess.run()` without `asyncio.to_thread()` | One less wrapper | Blocks entire FastAPI event loop, all requests hang | NEVER — the 5 seconds it takes to add `to_thread` saves hours of debugging |
+| Optimistically write the new worklog into the cache on POST | Instant UI, no refetch | Cache becomes authority; divergence from Jira is silent & permanent | **Never** — invalidate + refetch instead |
+| Full cache clear on every write (carryover from in-memory dict) | One line of code | Cache stampede; cross-user blowout on SQLite | Never in DB-backed cache; scope by key |
+| Keep `requests`/`jira` sync calls on the event loop | No refactor of M1 code | Blocks whole toolkit; SQLite corruption risk on Windows | Never — `asyncio.to_thread` is a documented hard rule |
+| Use `started[:10]` string slice for date | Avoids datetime parsing | TZ off-by-one at week edges; mis-bucketed insights | Never once TZ-aware parse is in place |
+| Treat `[]` fetch result as cacheable | Simpler cache path | Transient outage → false "0h logged" insights | Never — only cache successful fetches |
+| Scale weekly target (`40 × days/5`) instead of `daily × days` | Matches 8×5 by accident | Wrong as soon as daily base ≠ 8 or week ≠ 5 days | Never — use per-day base model |
 
 ---
 
 ## Integration Gotchas
 
-Common mistakes when connecting components to the existing plugin system.
-
 | Integration | Common Mistake | Correct Approach |
 |-------------|----------------|------------------|
-| Plugin DB file location | Placing `.db` at project root or hardcoded absolute path | Use `os.path.join(os.path.dirname(__file__), "doc_search_index.db")` — same pattern as `competence.py` line 31 |
-| `startup()` vs `register_routes()` | Heavy work (extraction, indexing, git pull) in `register_routes()` | `register_routes()` = route definitions ONLY. `startup()` = schema init ONLY. Heavy work → `asyncio.create_task()` spawned at end of `startup()` |
-| Module-level `plugin` attribute | Forgetting the auto-discovery singleton | Must have `plugin = DocSearchPlugin()` at module top-level (see `competence.py` line 1103) |
-| SQLite threading with FastAPI | Using default `sqlite3.connect()` without `check_same_thread=False` | ALWAYS use `check_same_thread=False` + `asyncio.to_thread()` for all DB operations. The competence plugin already does this (line 63) |
-| httpx vs requests for git/repo fetching | Using `requests` (sync) for HTTP git clone | Use `httpx` async client (already in the project) OR `subprocess` via `asyncio.to_thread()` for `git clone/pull` |
-| Frontend SPA integration | Building a separate React app instead of following the vanilla JS pattern | Use `core.js` framework patterns from `competence.js`: `h()`, `api()`, `registerPlugin()` |
-| Error handling in background tasks | Unhandled exceptions in `asyncio.create_task()` silently crash the task | Wrap all background work in try/except with logger: `except Exception as e: logger.error("Sync failed: %s", e, exc_info=True)` |
-| Plugin lifecycle for cleanup | Leaving file handles, DB connections, or git locks open on shutdown | Implement `shutdown()` to close: httpx clients (if any), DB connections, cancel background tasks, clean temp extraction files |
-| Config management | Inline config values in plugin code | Follow `config.load_jira_config()` pattern — create `config.load_docsearch_config()` that reads repo URLs, sync intervals, etc. |
+| Jira REST `worklog` API | Storing `started` as the raw ISO string and slicing `[:10]` for the date | Parse with offset, convert to `LOCAL_TZ`, store `date_local` |
+| Jira write (`POST/PUT/DELETE worklog`) | Writing `+0000` (UTC) while intending a local day → day shift | Send `started` with the user's local offset (or the existing noon-UTC hack consistently) so Jira records the intended local day |
+| Jira as cache upstream | Trusting cache after a write without re-fetch | Invalidate key on successful write; repopulate on next read |
+| SQLite (Windows) | Opening one global connection shared across `to_thread` tasks | Per-thread connections + `busy_timeout` + serialized writes (`asyncio.Lock`) |
+| Browser Notification API | Requesting permission on page load / re-prompting after deny | Request only on toggle click; persist state; degrade to in-app badge on deny |
 
 ---
 
 ## Performance Traps
 
-Patterns that work at small scale but fail as usage grows.
-
 | Trap | Symptoms | Prevention | When It Breaks |
 |------|----------|------------|----------------|
-| Synchronous extraction in event loop | Server unresponsive, all requests time out | `asyncio.to_thread()` for ALL extraction | 50+ files |
-| FTS5 with no content_rowid optimization | Slow queries on 3000 docs, index file >300MB | Content-less FTS5 tables, BM25 ranking | 500+ documents |
-| Extracting all files on every startup | 30-120s cold start | File hash + mtime incremental check | 100+ documents |
-| Loading entire PDF/DOCX into memory | OOM killer terminates process | Stream extraction; extract pages individually with context manager | 1 large PDF (>500MB) |
-| Single-threaded extraction of 3000 files | Takes 15+ minutes | `ThreadPoolExecutor(max_workers=4)` + `run_in_executor` | 500+ files |
-| git pull without timeout | Plugin hangs indefinitely on network error | `subprocess.run(["git", "pull"], timeout=60)` in `asyncio.to_thread()` | Any network blip |
-| FTS5 query without LIMIT or snippet bounds | Slow response, huge JSON payload | `LIMIT 50` + use `snippet(doc_search, 2, ...)` for match context, not full extracted text | 100+ results |
-| No search result caching | Repeated identical queries hit DB every time | In-memory LRU cache (e.g., `functools.lru_cache(128)` on search function) for identical queries within 5s | 10+ concurrent users |
+| Full-cache-clear stampede | After one log, many simultaneous Jira refetches; API rate-limit hits | Scoped invalidation by `(account_id, week)` | With >1 week or >1 teammate loaded |
+| Cache-as-truth divergence | Insights drift from Jira UI; "ghost" worklogs | Read-through only; never write-from-payload | Immediately on first missed invalidation |
+| Unbounded cache growth | SQLite file grows; slow queries | TTL + periodic prune of old weeks; index on `(account_id, week_start)` | After months of daily use |
+| Blocking Jira call on event loop | All toolkit endpoints freeze during a slow Jira call | `asyncio.to_thread` for every blocking call | Any Jira latency spike (>1s) |
 
 ---
 
 ## Security Mistakes
 
-Domain-specific security issues beyond general web security.
-
 | Mistake | Risk | Prevention |
 |---------|------|------------|
-| Path traversal in file preview endpoint | Attackers read arbitrary server files via `../../etc/passwd` | Resolve all file paths against allowed repo roots using `os.path.realpath()` and verify prefix: `if not resolved.startswith(allowed_root): raise HTTPException(403)` |
-| Storing raw extracted text in search results without sanitization | XSS via documents containing HTML/JS (e.g., RST raw directives) | HTML-escape all snippets before embedding in JSON; use `html.escape()` on snippet text |
-| git credentials in plugin code or config | Credential leak via git history or env inspection | Use existing git credential manager (Git Credential Manager on Windows) — do NOT store passwords in config |
-| No size limits on file preview | DoS via requesting preview of 2GB document | Limit preview to first 100KB; for PDF, limit to first 5 pages |
-| Subprocess injection via user-controlled repo paths | Command injection: `repo_path = "../../evil; rm -rf /"` | Validate repo paths against whitelist; use `shlex.quote()` for all subprocess arguments |
-| SQL injection in search queries | Though FTS5 is parameterized, manual query string concatenation is dangerous | ALWAYS use parameterized queries with `?` placeholders — FTS5 MATCH queries accept bound parameters: `cursor.execute("SELECT * FROM doc_search WHERE doc_search MATCH ?", (query,))` |
+| Storing Jira token in the cache DB | Token leakage if DB file copied | Cache stores only worklog *mirror* data; token stays in `config` (existing). Never echo `api_token` in `/api/jira/config` response (already returns `""` at line 268 — keep it that way) |
+| Notification permission requested without gesture | Browser console errors; user distrust | Request only from toggle click |
+| `os.startfile` / path handling on ticket folders | (Existing, not new) — unchanged by M4 | No new surface; keep existing `re.match(r"^[\w-]+$")` sanitization (line 621) |
 
 ---
 
 ## UX Pitfalls
 
-Common user experience mistakes in search applications.
-
 | Pitfall | User Impact | Better Approach |
 |---------|-------------|-----------------|
-| Silent zero-results page | User doesn't know if search worked or if index is empty | Show "No results for 'X'. Try different terms. X documents could not be searched (scanned PDFs, extraction errors). Index last updated: 2h ago." |
-| No search-as-you-type | User must press Enter after every query, slow feedback loop | Debounced input (300ms) firing `api()` calls. Vanilla JS: `input.addEventListener('input', debounce(doSearch, 300))` |
-| Results show only filename, no context | User must click every result to find the right one | Show: title, path, first 2 lines of snippet with `<mark>` highlighting, repo badge, file type icon |
-| No preview loading state | User clicks result, sees blank pane for 3 seconds | Show spinner immediately; stream preview via `<iframe>` or fetch text and render client-side |
-| "Rebuild Index" button without progress | User clicks, nothing happens for 60 seconds, thinks it's broken | Progress bar: "Extracting: 234/3000 files" → "Indexing: 45% complete". Poll `/api/doc_search/index/status` every 2 seconds |
-| Search returns results for deleted files | Clicking a result shows 404 | On git pull, detect deleted files and remove from index. Store repo path + relative path separately for existence checks |
-| No distinction between repos in results | User doesn't know which repo a result came from | Color-coded repo badges or filter chips: `[repo1] [repo2] [repo3]` |
+| Notify while tab is visible | Annoying duplicate of what's on screen | Suppress OS toast when `visibilityState === 'visible'`; use badge |
+| Badge never clears | User thinks gaps remain after fixing | Clear badge on gap-state transition to empty; recompute after mutation |
+| "On target" despite a marked-off day with logged hours | False reassurance | Exclude marked-off day from both sides + show warning |
+| Stale UI after logging (shared store not invalidated) | User re-logs or thinks it failed | Invalidate the week in the store on write response |
+| Browser notification toggle looks enabled but is denied | Dead control, user confusion | Disable/hide toggle + "enable in browser settings" hint when `"denied"` |
 
 ---
 
 ## "Looks Done But Isn't" Checklist
 
-Things that appear complete but are missing critical pieces.
-
-- [ ] **Text extraction:** Works on test docs, but 201 .doc files silently fail because python-docx can't open them — verify with a .doc fixture
-- [ ] **Text extraction:** PDF text extracted successfully, but 20% of PDFs are scanned (no text layer) — run extraction on ALL PDFs to get scanned count
-- [ ] **Text extraction:** All files extract on dev machine, but encoding errors hit on production Windows with Baltic locale documents — test with CP1257-encoded .doc fixtures
-- [ ] **Search index:** Queries work, but index is rebuilt from scratch every startup (no persistence) — restart plugin and verify search works without reindex
-- [ ] **Search index:** Snippets show correctly, but double-encoding produces garbled characters in Lithuanian text — search for "įrenginio" and verify snippet is readable
-- [ ] **Git sync:** Pull succeeds on first run, but fails on second run (uncommitted changes, merge conflicts) — test with dirty working directory
-- [ ] **Git sync:** Sync works when repo is accessible, but hangs forever when VPN is disconnected — test with unreachable repo URL
-- [ ] **Plugin integration:** Plugin loads and routes work, but startup() blocks all other plugins during extraction — verify other plugin endpoints respond during extraction
-- [ ] **File preview:** Preview works for .docx, but .doc preview returns binary garbage — verify .doc preview pipeline
-- [ ] **DrawIO/GraphML:** Files present in repo but silently skipped during extraction — verify these file types produce usable text
-- [ ] **Error handling:** Extraction failure on 1 corrupted file doesn't halt entire batch — inject a corrupt PDF and verify others still process
+- [ ] **Cache:** Verify cache is populated *only* by fetches, never by write payloads (Pitfall 1).
+- [ ] **Cache:** Verify a write invalidates only the affected `(account_id, week)`, not the whole table (Pitfall 2).
+- [ ] **Event loop:** Verify no synchronous `requests`/`jira`/SQLite call runs outside `asyncio.to_thread` (Pitfall 3).
+- [ ] **SQLite:** Verify `journal_mode=wal`, `busy_timeout` set, writes serialized (Pitfall 4).
+- [ ] **Timezone:** Verify a boundary worklog (e.g., 02:00 local Mon = 23:00 UTC Sun) buckets to the correct local day/week (Pitfall 5).
+- [ ] **Target:** Verify marking 1 non-working day drops a 40h target to 32h, and a day with logged hours marked off is excluded + warned (Pitfall 6).
+- [ ] **Notifications:** Verify OS toast fires only on gap *transition* and only when tab hidden (Pitfall 7).
+- [ ] **Permissions:** Verify `"denied"` hides the toggle and falls back to badge; request only on click (Pitfall 8).
+- [ ] **Error caching:** Verify a Jira 5xx does **not** cache an empty `[]` (Pitfall 9).
+- [ ] **Frontend store:** Verify logging hours updates the shared store without a full reload (Pitfall 12).
 
 ---
 
 ## Recovery Strategies
 
-When pitfalls occur despite prevention, how to recover.
-
 | Pitfall | Recovery Cost | Recovery Steps |
 |---------|---------------|----------------|
-| Used Whoosh, need to migrate to FTS5 | MEDIUM | Write a migration script that reads Whoosh index, emits SQL INSERT statements for FTS5. ~2h work. |
-| Index built with inline content (500MB+) | MEDIUM | ALTER approach: create new content-less FTS5 table, INSERT INTO new_fts SELECT from old, DROP old, rename new. Requires downtime for full reindex. |
-| All .doc files failed extraction (wrong library) | LOW | Add doc2txt to pipeline, re-run extraction phase on .doc files only (detected by extension). No index rebuild needed if using content-less schema. |
-| Encoding mojibake in index | HIGH | Re-extract ALL files with charset-normalizer in pipeline. Full index rebuild required since tokens are corrupted. |
-| Git repo moved, hardcoded paths broken | LOW | Update config. If using repo path whitelist, add new path. Re-clone if needed. |
-| Subprocess injection vulnerability discovered | LOW | Add `shlex.quote()` + path whitelist validation. No data migration needed. Audit existing index entries. |
+| Cache divergence (Pitfall 1) | LOW | Add scoped invalidation; run one force-refresh per affected week; backfill by re-fetch |
+| Stale/mis-bucketed TZ rows (Pitfall 5) | MEDIUM | Recompute `date_local` from raw `started` (offset-aware) via a one-off migration; re-bucket |
+| "database is locked" corruption (Pitfall 4) | MEDIUM–HIGH | Restore from WAL/auto-recover (toolkit `_ensure_schema` at startup); add write serialization to prevent recurrence |
+| False "0h" from cached error (Pitfall 9) | LOW | Flush cache for affected week; fix to not cache failures |
+| Notification permission denied (Pitfall 8) | LOW | UI falls back to badge; instruct user to re-enable in browser settings |
 
 ---
 
 ## Pitfall-to-Phase Mapping
 
-How roadmap phases should address these pitfalls.
-
 | Pitfall | Prevention Phase | Verification |
 |---------|------------------|--------------|
-| python-docx can't handle .doc (P#1) | Phase 1: Text Extraction | Test extraction on a .doc fixture, verify non-empty text output |
-| Whoosh abandonware (P#2) | Phase 2: Search Index Design | Confirm SQLite FTS5 chosen, verify BM25 ranking with sample queries |
-| Scanned PDF silent failure (P#3) | Phase 1: Text Extraction | Run extraction on all PDFs, verify `needs_ocr` flag is set correctly |
-| Blocking event loop (P#4) | All phases (cross-cutting) | Load-test: trigger extraction while hitting `/api/competence/stats` — verify no timeout |
-| Character encoding (P#5) | Phase 1: Text Extraction | Test with CP1257 .doc fixture, verify no `\ufffd` in output |
-| Cold start index rebuild (P#6) | Phase 2: Index Design + Phase 3: Sync | Restart plugin twice, verify second startup is sub-5-second |
-| FTS5 content storage strategy (P#7) | Phase 2: Index Design | Verify index file size is proportional to tokens, not raw document size |
-| Path traversal (Security) | Phase 2: Search API | Attempt `../../etc/hosts` in preview path — verify 403 |
-| Subprocess injection (Security) | Phase 3: Git Sync | Attempt `repo_path = "repo; rm -rf /"` — verify validation rejects it |
-| Windows file locking | Phase 3: Git Sync | Trigger git pull while extraction is running — verify no PermissionError |
-| Hardcoded repo config | Phase 3: Git Sync | Verify repo paths come from config, not inline constants |
+| 1 — Cache-as-truth | Phase 1 | Test: after write, cache row absent, not updated |
+| 2 — Over-broad invalidation | Phase 1 | Test: write invalidates only `(account_id, week)`; no refetch of other weeks |
+| 3 — Event-loop blocking | Phase 1 | Smoke: concurrent toolkit requests not blocked during Jira call |
+| 4 — Concurrent SQLite writes | Phase 1 | Load test: concurrent writes → no `database is locked` |
+| 5 — TZ week-boundary | Phase 1 (store `date_local`) + Phase 4 (week math) | Unit test on boundary timestamp |
+| 6 — Target miscalc | Phase 4 | Unit test: 4-day week = 32h; marked-off logged day excluded + warned |
+| 7 — Notification spam | Phase 3 | Test: only transition deltas notify; no toast when visible |
+| 8 — Permission denial | Phase 3 | Test: denied → toggle hidden + badge fallback; request only on click |
+| 9 — Caching failures | Phase 1 | Test: Jira 5xx → no empty cache row |
+| 10 — Write/insert race | Phase 1 | Test: insert failure leaves key absent, forces refetch |
+| 11 — TTL as primary | Phase 1/2 | Test: write invalidates immediately; TTL only fallback |
+| 12 — Stale frontend store | Phase 2/5 | Test: log → store updates without reload |
+| 13 — Account scoping | Phase 1 | Test: teammate/week isolation |
 
 ---
 
 ## Sources
 
-- python-docx v1.2.0 PyPI page & official docs (https://python-docx.readthedocs.io/) — confirms .docx-only, no .doc support — **HIGH confidence**
-- pdfplumber v0.11.10 PyPI page — confirms "Works best on machine-generated, rather than scanned, PDFs. Built on pdfminer.six." No OCR — **HIGH confidence**
-- Whoosh v2.7.4 PyPI page — release date April 4, 2016, no update in 10+ years. Python 2.5 classifier indicates extreme staleness — **HIGH confidence**
-- doc2txt v1.0.8 PyPI page — Python wrapper with bundled antiword binaries for Windows/Linux/macOS, July 2025 release. Supports .doc extraction — **HIGH confidence**
-- textract v2.0.0 PyPI page — unified extraction facade, April 2026 release, wraps multiple backends — **MEDIUM confidence** (new major version, ecosystem stability unproven)
-- charset-normalizer v3.4.7 PyPI page — "The Real First Universal Charset Detector," actively maintained (April 2026), 97% accuracy, better than chardet — **HIGH confidence**
-- olefile v0.47 PyPI page — stable OLE2 parser, December 2023, handles Compound File Binary Format (Office 97-2003) — **HIGH confidence**
-- Project codebase analysis: `app/plugins/competence.py` (lines 93-99 async SQLite pattern, lines 607-609 background task pattern, lines 1037-1092 schema management pattern) — **HIGH confidence**
-- SQLite FTS5 documentation (sqlite.org/fts5.html) — external content tables, BM25, highlight/snippet functions — **HIGH confidence**
+- `app/plugins/jira_tracker.py` (lines cited): synchronous `_api`/`_jira` calls in `async def` handlers (91-93, 212, 223, 298, 353, 430, 457, 530); in-memory full-clear cache (44-79, 533/553/564); `started[:10]` date slice (229, 508); `_to_jira_datetime` UTC `+0000` (149-155); naive `_week_range` (158-166); `api_token` never echoed (268).
+- `PROJECT.md` (Alps Toolkit): "All blocking I/O via `asyncio.to_thread()` — never on event loop (Windows SQLite safety)" (Key Constraints #5, Key Decisions #53/#56/#57); SQLite WAL + per-plugin DB + `_ensure_schema` recovery; M4 goal statement (local persistence as "read-only mirror of Jira," insights target recalc).
+- Platform-stable behavior (no live verification required, but flagged where ambiguous): SQLite WAL single-writer + `busy_timeout` (sqlite.org); MDN Notification API `requestPermission()` states (`granted`/`denied`/`default`) and gesture requirement; IANA `zoneinfo` / `datetime.astimezone` for TZ-correct date bucketing.
+- **Flagged for live spike (Phase 1):** exact timezone offset Jira returns in `started` for this account (UTC vs reporter TZ) — confirm via one real `GET issue/{key}/worklog` call; the recommended fix (offset-aware parse → `LOCAL_TZ` → `date_local`) is correct regardless.
 
 ---
-
-*Pitfalls research for: Documentation Search Engine (M3)*
-*Researched: 2026-07-01*
+*Pitfalls research for: Alps Toolkit M4 — Jira Tracker cache + notifications + insights*
+*Researched: 2026-07-13*
