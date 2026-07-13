@@ -84,44 +84,44 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| PERS-01 | — | Pending |
-| PERS-02 | — | Pending |
-| PERS-03 | — | Pending |
-| PERS-04 | — | Pending |
-| PERS-05 | — | Pending |
-| PERS-06 | — | Pending |
-| UI-01 | — | Pending |
-| UI-02 | — | Pending |
-| UI-03 | — | Pending |
-| UI-04 | — | Pending |
-| UI-05 | — | Pending |
-| UI-06 | — | Pending |
-| INS-01 | — | Pending |
-| INS-02 | — | Pending |
-| INS-03 | — | Pending |
-| INS-04 | — | Pending |
-| INS-05 | — | Pending |
-| INS-06 | — | Pending |
-| INS-07 | — | Pending |
-| INS-08 | — | Pending |
-| INS-09 | — | Pending |
-| NOTIF-01 | — | Pending |
-| NOTIF-02 | — | Pending |
-| NOTIF-03 | — | Pending |
-| NOTIF-04 | — | Pending |
-| NOTIF-05 | — | Pending |
-| GAP-01 | — | Pending |
-| GAP-02 | — | Pending |
-| TELTO-01 | — | Pending |
-| TELTO-02 | — | Pending |
-| TELTO-03 | — | Pending |
-| TELTO-04 | — | Pending |
+| PERS-01 | Phase 8 | Pending |
+| PERS-02 | Phase 8 | Pending |
+| PERS-03 | Phase 9 | Pending |
+| PERS-04 | Phase 9 | Pending |
+| PERS-05 | Phase 8 | Pending |
+| PERS-06 | Phase 8 | Pending |
+| UI-01 | Phase 10 | Pending |
+| UI-02 | Phase 10 | Pending |
+| UI-03 | Phase 10 | Pending |
+| UI-04 | Phase 10 | Pending |
+| UI-05 | Phase 10 | Pending |
+| UI-06 | Phase 10 | Pending |
+| INS-01 | Phase 11 | Pending |
+| INS-02 | Phase 11 | Pending |
+| INS-03 | Phase 11 | Pending |
+| INS-04 | Phase 11 | Pending |
+| INS-05 | Phase 11 | Pending |
+| INS-06 | Phase 11 | Pending |
+| INS-07 | Phase 11 | Pending |
+| INS-08 | Phase 11 | Pending |
+| INS-09 | Phase 11 | Pending |
+| NOTIF-01 | Phase 12 | Pending |
+| NOTIF-02 | Phase 12 | Pending |
+| NOTIF-03 | Phase 12 | Pending |
+| NOTIF-04 | Phase 12 | Pending |
+| NOTIF-05 | Phase 12 | Pending |
+| GAP-01 | Phase 13 | Pending |
+| GAP-02 | Phase 13 | Pending |
+| TELTO-01 | Phase 13 | Pending |
+| TELTO-02 | Phase 13 | Pending |
+| TELTO-03 | Phase 13 | Pending |
+| TELTO-04 | Phase 13 | Pending |
 
 **Coverage:**
 - v1 requirements: 32 total
-- Mapped to phases: 0
-- Unmapped: 32 ⚠️
+- Mapped to phases: 32
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-07-13*
-*Last updated: 2026-07-13 after initial definition*
+*Last updated: 2026-07-13 — traceability filled during M4 roadmap creation (Phases 8-13)*
