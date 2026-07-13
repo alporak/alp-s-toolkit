@@ -40,7 +40,7 @@
 <summary>🔄 M4: Jira Tracker Rework (Phases 8-13) — IN PROGRESS</summary>
 
 - [x] Phase 8: SQLite Persistence Foundation — local store survives restarts, event-loop refactor, timezone-correct dates
-- [ ] Phase 9: Read-Through Cache Integration — TTL + stale-serve, scoped invalidation
+- [x] Phase 9: Read-Through Cache Integration — TTL + stale-serve, scoped invalidation
 - [ ] Phase 10: Frontend Seamless Tab Redesign — persistent sidebar, shared store, no re-fetch on switch
 - [ ] Phase 11: Insights Engine — ghost-day / under-target / non-working-day logic + Insights tab UI
 - [ ] Phase 12: Notifications + Badge — nav/tab badges, toggleable transition-only browser notifs
@@ -62,7 +62,7 @@
 | 6. Sync Engine & Search API | M3 | 2/2 | Complete | 2026-07-02 |
 | 7. Frontend SPA | M3 | 1/1 | Complete | 2026-07-02 |
 | 8. SQLite Persistence Foundation | M4 | 1/1 | Complete | 2026-07-13 |
-| 9. Read-Through Cache Integration | M4 | 0/0 | Not started | — |
+| 9. Read-Through Cache Integration | M4 | 1/1 | Complete | 2026-07-13 |
 | 10. Frontend Seamless Tab Redesign | M4 | 0/0 | Not started | — |
 | 11. Insights Engine | M4 | 0/0 | Not started | — |
 | 12. Notifications + Badge | M4 | 0/0 | Not started | — |

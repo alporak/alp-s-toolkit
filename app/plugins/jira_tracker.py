@@ -257,6 +257,94 @@ def _fetch_worklogs_for_user(account_id: str, date_from: str, date_to: str,
     return result, False
 
 
+# ── Read-through cache (Phase 9) ────────────────────────────────────────
+# One in-flight future per (account, week) prevents duplicate Jira fetches.
+_inflight: dict[str, "asyncio.Future"] = {}
+
+
+def _meta_age(meta: dict) -> float:
+    """Seconds since the cache row was fetched."""
+    try:
+        ts = datetime.fromisoformat(meta["fetched_at"]).timestamp()
+    except Exception:
+        return 1e9
+    return _time.time() - ts
+
+
+async def _load_weekly(account_id: str, date_from: str, date_to: str,
+                       display_name: str = "", force: bool = False):
+    """Read-through weekly worklogs.
+
+    Returns (rows, cached, stale). Serves the SQLite mirror when fresh; fetches from
+    Jira on miss/expiry; on Jira failure serves the last stored copy with stale=True
+    instead of erroring (Pitfall 9 — a failed fetch is never cached as empty).
+    """
+    week_start = jira_store._monday_of(date_from)
+    key = f"{account_id}|{week_start}"
+    if not force and key in _inflight:
+        try:
+            return await _inflight[key]
+        except Exception:
+            pass  # fall through to a fresh attempt
+
+    loop = asyncio.get_event_loop()
+    fut: "asyncio.Future" = loop.create_future()
+
+    async def _do():
+        meta = await asyncio.to_thread(
+            jira_store.get_cache_meta, account_id, week_start)
+        ttl = _cache_ttl()
+        if meta and not force and _meta_age(meta) < ttl:
+            return await asyncio.to_thread(
+                jira_store.get_worklogs, account_id, week_start), True, False
+        try:
+            rows, _ = await asyncio.to_thread(
+                _fetch_worklogs_for_user, account_id, date_from, date_to,
+                display_name)
+            return rows, False, False
+        except Exception:
+            stored = await asyncio.to_thread(
+                jira_store.get_worklogs, account_id, week_start)
+            if stored:
+                return stored, True, True
+            raise
+
+    async def _runner():
+        try:
+            fut.set_result(await _do())
+        except Exception as e:
+            fut.set_exception(e)
+        finally:
+            _inflight.pop(key, None)
+
+    _inflight[key] = fut
+    asyncio.ensure_future(_runner())
+    return await fut
+
+
+async def _invalidate_for_write(date_str: str = None, worklog_id: str = None):
+    """Scoped invalidation: drop only the affected (me, week). Never a global clear."""
+    try:
+        me_r = await asyncio.to_thread(_api, "get", "myself")
+        if not me_r.ok:
+            return
+        me_id = me_r.json().get("accountId")
+    except Exception:
+        return
+    if worklog_id:
+        row = jira_store.get_worklog(me_id, worklog_id)
+        week_start = row["week_start"] if row else None
+    elif date_str:
+        week_start = jira_store._monday_of(date_str[:10])
+    else:
+        week_start = jira_store._monday_of(date.today().isoformat())
+    if week_start:
+        try:
+            jira_store.mark_stale_week(me_id, week_start)
+        except Exception as e:
+            print(f"[Jira] invalidation failed: {e}")
+
+
 class JiraTrackerPlugin(ToolkitPlugin):
     id = "jira"
     name = "Jira Tracker"
@@ -470,11 +558,11 @@ class JiraTrackerPlugin(ToolkitPlugin):
                     t_name = me_r.json().get("displayName")
 
             if force_refresh:
-                _cache_clear(t_id)
+                jira_store.mark_stale_week(t_id, jira_store._monday_of(d_from))
 
-            wl, was_cached = await asyncio.to_thread(
-                _fetch_worklogs_for_user, t_id, d_from, d_to, t_name)
-            
+            wl, was_cached, was_stale = await _load_weekly(
+                t_id, d_from, d_to, t_name, force_refresh)
+
             users_data.append({
                 "accountId": t_id,
                 "displayName": t_name,
@@ -487,6 +575,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 "sunday": d_to,
                 "users": users_data,
                 "cached": was_cached,
+                "stale": was_stale,
                 "cache_ttl_minutes": _cache_ttl() // 60,
             }
 
@@ -552,7 +641,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 _api, "post", f"issue/{req.issue_key}/worklog",
                 json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
-                _cache_clear()   # invalidate so next fetch gets fresh data
+                await _invalidate_for_write(date_str=req.started)
                 return {"ok": True, "id": r.json().get("id")}
             raise HTTPException(r.status_code, r.text)
 
@@ -573,7 +662,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 _api, "put", f"issue/{issue_key}/worklog/{worklog_id}",
                 json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
-                _cache_clear()  # invalidate
+                await _invalidate_for_write(date_str=req.started)
                 return {"ok": True, "id": r.json().get("id")}
             raise HTTPException(r.status_code, r.text)
 
@@ -585,7 +674,7 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 _api, "delete", f"issue/{issue_key}/worklog/{worklog_id}",
                 params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 204):
-                _cache_clear()   # invalidate
+                await _invalidate_for_write(worklog_id=worklog_id)
             return {"ok": r.status_code in (200, 204)}
 
         # ── Cache management ────────────────────────────────────
@@ -616,6 +705,8 @@ class JiraTrackerPlugin(ToolkitPlugin):
                 _api, "post", f"issue/{issue_key}/worklog",
                 json=body, params={"adjustEstimate": "auto", "notifyUsers": "false"})
             if r.status_code in (200, 201):
+                await _invalidate_for_write(
+                    date_str=req.started or date.today().isoformat())
                 return {"ok": True}
             raise HTTPException(r.status_code, r.text)
 

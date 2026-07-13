@@ -260,6 +260,20 @@ def upsert_worklogs(account_id: str, rows: list[dict]) -> None:
             conn.close()
 
 
+def get_worklog(account_id: str, worklog_id: str) -> dict | None:
+    """Return a single stored worklog by id (for precise invalidation)."""
+    with _db_lock:
+        conn = _get_db()
+        try:
+            row = conn.execute(
+                "SELECT * FROM worklogs WHERE account_id=? AND id=?",
+                (account_id, worklog_id),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
 def get_worklogs(account_id: str, week_start: str) -> list[dict]:
     """Return all stored worklogs for *account_id* in the week starting *week_start*."""
     with _db_lock:
